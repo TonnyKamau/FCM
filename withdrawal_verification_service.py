@@ -57,7 +57,14 @@ class WithdrawalVerificationService:
     @staticmethod
     def _is_withdrawal_transaction(transaction: Dict[str, Any]) -> bool:
         tx_type = transaction.get("type", "")
-        return tx_type == "WITHDRAW" or tx_type.startswith("GROUP_WITHDRAWAL_")
+        payment_method = transaction.get("paymentMethod", "")
+        
+        # B2C transactions are those that are NOT STK push ("Direct...")
+        # and are explicitly marked as withdrawal types
+        is_correct_type = tx_type == "WITHDRAW" or tx_type.startswith("GROUP_WITHDRAWAL_")
+        is_b2c = not payment_method.startswith("Direct")
+        
+        return is_correct_type and is_b2c
 
     @staticmethod
     def _calculate_withdrawal_fee(amount: float) -> float:
@@ -153,35 +160,35 @@ class WithdrawalVerificationService:
         except Exception as exc:
             logger.exception("Error updating related fee transactions as failed: %s", exc)
 
-    def _reverse_withdrawal_deduction(
-        self, user_id: str, account_type: str, withdrawal_amount: float, transaction_id: str
-    ) -> bool:
-        fee = self._calculate_withdrawal_fee(withdrawal_amount)
-        total = withdrawal_amount + fee
-        logger.info(
-            "Reversing withdrawal deduction: amount=%s fee=%s total=%s accountType=%s",
-            withdrawal_amount, fee, total, account_type,
-        )
-        try:
-            saving_ref = (
-                self.db.collection("SAVINGS")
-                .document(user_id)
-                .collection("accounts")
-                .document(account_type)
-            )
-            snap = saving_ref.get()
-            if not snap.exists:
-                logger.error("Savings account not found for reversal")
-                return False
-            data = snap.to_dict() or {}
-            old_balance = float(data.get("amount", 0))
-            new_balance = old_balance + total
-            saving_ref.update({"amount": new_balance, "lastUpdated": int(time.time() * 1000)})
-            logger.info("Balance restored: %s -> %s", old_balance, new_balance)
-            return True
-        except Exception as exc:
-            logger.exception("Failed to restore balance: %s", exc)
-            return False
+    # def _reverse_withdrawal_deduction(
+    #     self, user_id: str, account_type: str, withdrawal_amount: float, transaction_id: str
+    # ) -> bool:
+    #     fee = self._calculate_withdrawal_fee(withdrawal_amount)
+    #     total = withdrawal_amount + fee
+    #     logger.info(
+    #         "Reversing withdrawal deduction: amount=%s fee=%s total=%s accountType=%s",
+    #         withdrawal_amount, fee, total, account_type,
+    #     )
+    #     try:
+    #         saving_ref = (
+    #             self.db.collection("SAVINGS")
+    #             .document(user_id)
+    #             .collection("accounts")
+    #             .document(account_type)
+    #         )
+    #         snap = saving_ref.get()
+    #         if not snap.exists:
+    #             logger.error("Savings account not found for reversal")
+    #             return False
+    #         data = snap.to_dict() or {}
+    #         old_balance = float(data.get("amount", 0))
+    #         new_balance = old_balance + total
+    #         saving_ref.update({"amount": new_balance, "lastUpdated": int(time.time() * 1000)})
+    #         logger.info("Balance restored: %s -> %s", old_balance, new_balance)
+    #         return True
+    #     except Exception as exc:
+    #         logger.exception("Failed to restore balance: %s", exc)
+    #         return False
 
     # ───────────────────────────────────────────────────────────────────────────
     # Public API
@@ -343,8 +350,8 @@ class WithdrawalVerificationService:
                         self._update_related_fee_transactions_as_failed(user_id, doc.id)
 
                         tx_type = data.get("type", "")
-                        if not tx_type.startswith("GROUP_WITHDRAWAL_"):
-                            self._reverse_withdrawal_deduction(user_id, account_type, withdrawal_amount, doc.id)
+                        # if not tx_type.startswith("GROUP_WITHDRAWAL_"):
+                        #     self._reverse_withdrawal_deduction(user_id, account_type, withdrawal_amount, doc.id)
 
                         return {"success": True, "transactionId": doc.id, "amount": withdrawal_amount}
 

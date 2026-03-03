@@ -8,6 +8,7 @@ Uses Firestore with same paths as other services:
 """
 
 import logging
+import re
 import time
 import uuid
 from datetime import datetime
@@ -58,8 +59,8 @@ class PaybillVerificationService:
 
     @staticmethod
     def _get_current_month() -> str:
-        """Returns current month like 'NOV' (matches Android Constants.getCurrentMonth())."""
-        return datetime.now().strftime("%b").upper()
+        """Returns current month like 'Nov'."""
+        return datetime.now().strftime("%b")
 
     @staticmethod
     def _generate_uuid() -> str:
@@ -91,13 +92,20 @@ class PaybillVerificationService:
             formatted_date = payment.get("FORMATTED_DATE", "")
 
             # Parse timestamp
-            timestamp = int(time.time() * 1000)
+            # Parse timestamp from verified transaction
+            timestamp = int(time.time() * 1000)  # Default to current time
             if formatted_date:
                 try:
-                    dt = datetime.strptime(formatted_date, "%Y-%m-%d %H:%M:%S")
-                    timestamp = int(dt.timestamp() * 1000)
-                except ValueError:
-                    pass
+                    # Robust parsing similar to sync_transactions.py
+                    # Split by -, space, or :
+                    parts = re.split(r'[- :]', formatted_date)
+                    parts = [int(p) for p in parts if p]
+                    
+                    if len(parts) >= 6:
+                        dt = datetime(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5])
+                        timestamp = int(dt.timestamp() * 1000)
+                except Exception as e:
+                    logger.warning(f"Failed to parse date '{formatted_date}': {e}")
 
             current_month = self._get_current_month()
 
