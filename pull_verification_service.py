@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 import requests
+from google.cloud import firestore as fs
 
 from config import PULL_API_URL
 from firebase_utils import get_db
@@ -127,20 +128,21 @@ class PullVerificationService:
                 data = snap.to_dict() or {}
                 old_balance = float(data.get("amount", 0.0))
 
-            new_balance = old_balance + float(amount)
-
+            # Atomic server-side increment — safe against concurrent updates
             saving_ref.set(
                 {
                     "id": account_type,
-                    "amount": new_balance,
+                    "amount": fs.Increment(float(amount)),
                     "accountType": account_type,
                     "userId": user_id,
                     "lastUpdated": int(time.time() * 1000),
-                }
+                },
+                merge=True,
             )
 
+            new_balance = old_balance + float(amount)  # approximate for display
             logger.info(
-                "Updated balance for user=%s accountType=%s: %s -> %s",
+                "Updated balance for user=%s accountType=%s: %s -> ~%s (atomic increment)",
                 user_id,
                 account_type,
                 old_balance,

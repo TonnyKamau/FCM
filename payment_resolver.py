@@ -97,43 +97,83 @@ class PaymentResolverService:
     def _handle_stk_pending(self, user_id, month, tx_id, data, checkout_request_id):
         """Handles pending STK Push transactions."""
         logger.info(f"Querying STK status for {tx_id} (CheckoutRequestID: {checkout_request_id})...")
-        
+
         result = self.mpesa_api.query_stk_push_status(checkout_request_id)
         if result is None:
-            logger.error(f"STK status query for {tx_id} (CheckoutRequestID: {checkout_request_id}) returned None. Check network or API credentials.")
+            logger.error(f"STK status query for {tx_id} returned None. Check network or API credentials.")
             return
 
-        # Response Code 0 means Safaricom accepted the query
-        # ResultCode 0 means the transaction was successful
-        result_code = result.get("ResultCode")
-        if result_code is not None:
-            result_code = int(result_code)
-        
-        if result_code == 0:
-            logger.info(f"STK tx {tx_id} SUCCESS. Resolving immediately.")
-            
-            amount = float(data.get("amount", 0))
-            account_type = data.get("accountType", "NORMAL")
-            merchant_request_id = data.get("accountReference") or checkout_request_id
-            
-            # 1. Update Transaction to DONE
-            self._mark_transaction_done(
-                user_id, month, tx_id, "DONE", 
-                f"Resolved via Status Query. Result: {result.get('ResultDesc', 'Success')}"
-            )
-            
-            # 2. Update Balance (Directly using internal verification helpers if possible)
-            # We use a dummy transaction code since query does not provide one
-            self.payment_service._update_user_balance(user_id, account_type, amount)
-            
-            logger.info(f"STK tx {tx_id} fully resolved and balance updated.")
+        try:
+            result_code = int(result.get("ResultCode", -1))
+        except (TypeError, ValueError):
+            result_code = -1
 
-        elif result_code is not None and result_code > 0:
-            logger.warning(f"STK tx {tx_id} FAILED with code {result_code}.")
-            self._mark_transaction_done(user_id, month, tx_id, "FAILED", f"M-Pesa result: {result.get('ResultDesc')}")
+        result_desc = result.get("ResultDesc", "")
+
+        # ── Confirmed paid ────────────────────────────────────────────
+        if result_code == 0:
+            logger.info(f"STK tx {tx_id} confirmed by Safaricom. Resolving...")
+
+            amount        = float(data.get("amount", 0))
+            account_type  = data.get("accountType", "NORMAL")
+            merchant_request_id = data.get("accountReference") or checkout_request_id
+
+            # Try PHP verification first to get the real M-Pesa transaction code
+            stk_tx_code = f"STK-{checkout_request_id[-10:]}"
+            php_result = self.payment_service.verify_and_update_balance(
+                merchant_request_id, user_id, account_type, 0, amount
+            )
+            if php_result.get("verified"):
+                stk_tx_code = php_result.get("transactionCode", stk_tx_code)
+                logger.info(f"STK tx {tx_id} resolved via PHP — code={stk_tx_code}")
+            else:
+                # PHP not updated yet — write DONE directly
+                self._mark_transaction_done(
+                    user_id, month, tx_id, "DONE",
+                    extra_fields={
+                        "transactionCode": stk_tx_code,
+                        "paymentMethod":   "Direct Mobile - Verified",
+                    }
+                )
+                self.payment_service._update_user_balance(user_id, account_type, amount)
+                logger.info(f"STK tx {tx_id} resolved directly — code={stk_tx_code}")
+
+        # ── Cancelled by user ─────────────────────────────────────────
+        elif result_code == 1032:
+            logger.warning(f"STK tx {tx_id} cancelled by user.")
+            self._mark_transaction_done(
+                user_id, month, tx_id, "FAILED",
+                extra_fields={
+                    "paymentMethod": "Direct Mobile - Cancelled by user",
+                    "failedAt":      int(time.time() * 1000),
+                }
+            )
+
+        # ── STK push timed out (user did not respond) ─────────────────
+        elif result_code == 1037:
+            logger.warning(f"STK tx {tx_id} timed out — user did not respond.")
+            self._mark_transaction_done(
+                user_id, month, tx_id, "FAILED",
+                extra_fields={
+                    "paymentMethod": "Direct Mobile - STK push request timed out",
+                    "failedAt":      int(time.time() * 1000),
+                }
+            )
+
+        # ── Other definitive failure (result_code > 0) ────────────────
+        elif result_code > 0:
+            logger.warning(f"STK tx {tx_id} failed — code={result_code} desc={result_desc}")
+            self._mark_transaction_done(
+                user_id, month, tx_id, "FAILED",
+                extra_fields={
+                    "paymentMethod": f"Direct Mobile - Failed: {result_desc}",
+                    "failedAt":      int(time.time() * 1000),
+                }
+            )
+
+        # ── Still pending / query error ───────────────────────────────
         else:
-            # Still pending or error
-            logger.info(f"STK tx {tx_id} still pending or error. Waiting for next pass.")
+            logger.info(f"STK tx {tx_id} still pending (code={result_code}). Waiting for next pass.")
 
     def _handle_b2c_pending(self, user_id, month, tx_id, data):
         """Handles pending B2C withdrawal transactions."""
@@ -184,24 +224,36 @@ class PaymentResolverService:
     def _handle_max_retries(self, user_id, month, tx_id, data):
         payment_method = data.get("paymentMethod", "")
         is_stk_push = payment_method.startswith("Direct")
-        
+
         if not is_stk_push:
-            # Let the existing verification service handle failure/reversal if needed
-            logger.info(f"B2C tx {tx_id} max retries hit. Handled by fallback verification.")
+            # B2C — delegate to the withdrawal service (handles fee reversal etc.)
+            logger.info(f"B2C tx {tx_id} max retries hit. Delegating to withdrawal service.")
             self.withdrawal_service.handle_failed_withdrawal_for_user(
                 user_id, data.get("accountReference"), "Max retries exceeded"
             )
         else:
-            self._mark_transaction_done(user_id, month, tx_id, "FAILED", "Max retries exceeded")
+            # STK — mark FAILED with proper paymentMethod and failedAt
+            logger.warning(f"STK tx {tx_id} max retries exceeded. Marking FAILED.")
+            self._mark_transaction_done(
+                user_id, month, tx_id, "FAILED",
+                extra_fields={
+                    "paymentMethod": "Direct Mobile - Verification timed out",
+                    "failedAt":      int(time.time() * 1000),
+                }
+            )
 
-    def _mark_transaction_done(self, user_id, month, tx_id, status, note):
+    def _mark_transaction_done(self, user_id, month, tx_id, status, note=None, extra_fields: Dict[str, Any] = None):
         update_data = {
-            "status": status,
+            "status":       status,
             "lastModified": int(time.time() * 1000),
-            "resolverNote": note
         }
+        if note:
+            update_data["resolverNote"] = note
+        if extra_fields:
+            update_data.update(extra_fields)
+
         self.db.collection("TRANSACTIONS").document(user_id).collection(month).document(tx_id).update(update_data)
-        logger.info(f"Marked tx {tx_id} as {status}")
+        logger.info(f"Marked tx {tx_id} as {status} | fields={list(update_data.keys())}")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

@@ -183,6 +183,73 @@ def payment_verification():
         return _add_cors_headers(resp), 500
 
 
+@app.route('/stk-query', methods=['POST', 'OPTIONS'])
+def stk_query():
+    """
+    Separate endpoint for real-time Safaricom STK push status queries.
+
+    Android calls this after the PHP verification endpoint (/payment-verification)
+    has not confirmed the transaction within 5 seconds, giving a direct
+    Safaricom fallback that is independent of the PHP polling cycle.
+
+    Expected JSON body
+    ------------------
+    {
+        "checkoutRequestId": "ws_CO_...",   ← from Safaricom STK push response
+        "merchantRequestId": "29115-...",   ← used as accountReference in Firestore
+        "userId":            "abc123",
+        "accountType":       "NORMAL",
+        "expectedAmount":    1000.0,
+        "currentBalance":    5000.0
+    }
+
+    Response
+    --------
+    { success, verified, source?, transactionCode?, newBalance?,
+      resultCode, resultDesc, cancelled?, pending?, error? }
+    """
+    if request.method == 'OPTIONS':
+        resp = jsonify({'ok': True})
+        return _add_cors_headers(resp), 200
+
+    auth_header = request.headers.get('Authorization') or ''
+    if not _validate_auth(auth_header):
+        resp = jsonify({'error': 'Unauthorized - Invalid or missing token'})
+        return _add_cors_headers(resp), 401
+
+    data = request.get_json(silent=True) or {}
+
+    checkout_request_id = data.get('checkoutRequestId', '').strip()
+    merchant_request_id = data.get('merchantRequestId', '').strip()
+    user_id             = data.get('userId', '').strip()
+    account_type        = data.get('accountType', 'NORMAL').strip()
+    expected_amount     = float(data.get('expectedAmount', 0) or 0)
+    current_balance     = float(data.get('currentBalance', 0) or 0)
+
+    if not checkout_request_id or not user_id:
+        resp = jsonify({'error': 'Missing checkoutRequestId or userId'})
+        return _add_cors_headers(resp), 400
+
+    try:
+        from stk_query_service import StkQueryService
+        service = StkQueryService()
+        result = service.query_and_verify(
+            checkout_request_id=checkout_request_id,
+            merchant_request_id=merchant_request_id,
+            user_id=user_id,
+            account_type=account_type,
+            expected_amount=expected_amount,
+            current_balance=current_balance,
+        )
+        resp = jsonify(result)
+        return _add_cors_headers(resp), 200
+
+    except Exception as exc:
+        app.logger.exception('STK query endpoint error: %s', exc)
+        resp = jsonify({'error': 'Internal server error'})
+        return _add_cors_headers(resp), 500
+
+
 @app.route('/paybill-verification', methods=['POST', 'OPTIONS'])
 def paybill_verification():
     """

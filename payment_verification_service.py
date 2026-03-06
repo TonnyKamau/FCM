@@ -1,7 +1,10 @@
 import logging
+import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from google.cloud import firestore as fs
 
 from config import PAYMENT_API_URL
 from firebase_utils import get_db
@@ -117,26 +120,29 @@ class PaymentVerificationService:
                 .document(account_type)
             )
 
+            # Read old balance for logging/response only — not used in the write
             snap = saving_ref.get()
             old_balance = 0.0
             if snap.exists:
                 data = snap.to_dict() or {}
                 old_balance = float(data.get("amount", 0.0))
 
-            new_balance = old_balance + float(amount)
-
+            # Atomic server-side increment — safe against concurrent updates
+            # (e.g. STK query + PHP callback confirming simultaneously)
             saving_ref.set(
                 {
                     "id": account_type,
-                    "amount": new_balance,
+                    "amount": fs.Increment(float(amount)),
                     "accountType": account_type,
                     "userId": user_id,
-                    "lastUpdated": int(__import__("time").time() * 1000),
-                }
+                    "lastUpdated": int(time.time() * 1000),
+                },
+                merge=True,
             )
 
+            new_balance = old_balance + float(amount)  # approximate for display
             logger.info(
-                "Updated balance for user=%s accountType=%s: %s -> %s",
+                "Updated balance for user=%s accountType=%s: %s -> ~%s (atomic increment)",
                 user_id,
                 account_type,
                 old_balance,
@@ -151,6 +157,31 @@ class PaymentVerificationService:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Balance update error: %s", exc)
             return {"success": False, "error": str(exc)}
+
+    def _transaction_already_confirmed(
+        self, user_id: str, account_reference: str
+    ) -> bool:
+        """
+        Return True if a DONE transaction matching account_reference already
+        exists for this user.
+
+        Called before the stk_query_direct_no_doc balance credit to prevent
+        double-crediting when payment_resolver or another path confirmed first.
+        """
+        try:
+            user_ref = self.db.collection("TRANSACTIONS").document(user_id)
+            for month_col in user_ref.collections():
+                for doc in month_col.stream():
+                    data = doc.to_dict() or {}
+                    if (
+                        data.get("accountReference", "") == account_reference
+                        and data.get("status", "") == "DONE"
+                    ):
+                        return True
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error checking if transaction already confirmed: %s", exc)
+            return False
 
     # -------- Public API (mirrors PHP version) ---------------------------------
     def verify_and_update_balance(
@@ -221,9 +252,7 @@ class PaymentVerificationService:
                 "amount": amount,
                 "oldBalance": balance_result["oldBalance"],
                 "newBalance": balance_result["newBalance"],
-                "timestamp": __import__("datetime")
-                .datetime.utcnow()
-                .strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("Verification error: %s", exc)
