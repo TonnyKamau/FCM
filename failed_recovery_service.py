@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from firebase_admin import messaging
@@ -183,7 +183,16 @@ class FailedRecoveryService:
           - FORMATTED_DATE is on the same calendar day as the Firestore timestamp
           - TRANSACTION CODE not already used on a DONE transaction
         """
-        tx_date = datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d")
+        # PHP PaymentProcess.php returns FORMATTED_DATE in Kenya time (EAT, UTC+3).
+        # Convert the Firestore ms timestamp to EAT as well so date strings align.
+        # Keep a ±1 day window as a safety net for near-midnight edge cases.
+        EAT = timezone(timedelta(hours=3))
+        tx_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=EAT)
+        tx_dates = {
+            (tx_dt - timedelta(days=1)).strftime("%Y-%m-%d"),
+            tx_dt.strftime("%Y-%m-%d"),
+            (tx_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
 
         for payment in php_payments:
             p_type   = (payment.get("TYPE") or "").upper()
@@ -194,7 +203,7 @@ class FailedRecoveryService:
             if (
                 p_type == "DEPOSIT"
                 and abs(p_amount - amount) < 0.01
-                and p_date == tx_date
+                and p_date in tx_dates
                 and p_code not in used_codes
             ):
                 return payment
