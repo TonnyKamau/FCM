@@ -250,6 +250,51 @@ def stk_query():
         return _add_cors_headers(resp), 500
 
 
+@app.route('/recover-failed-transactions', methods=['POST', 'OPTIONS'])
+def recover_failed_transactions():
+    """
+    Scans a user's FAILED Direct Mobile transactions (last 24 h) and attempts
+    to reconcile each one against the PHP PaymentProcess.php API.
+
+    Matching: TYPE=DEPOSIT + same amount + same calendar day.
+    On match: Firestore doc → DONE, balance credited, FCM notification sent.
+
+    Expected JSON body
+    ------------------
+    { "userId": "abc123" }
+
+    Response
+    --------
+    { success, recoveredCount, results[] }
+    """
+    if request.method == 'OPTIONS':
+        resp = jsonify({'ok': True})
+        return _add_cors_headers(resp), 200
+
+    auth_header = request.headers.get('Authorization') or ''
+    if not _validate_auth(auth_header):
+        resp = jsonify({'error': 'Unauthorized - Invalid or missing token'})
+        return _add_cors_headers(resp), 401
+
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('userId', '').strip()
+
+    if not user_id:
+        resp = jsonify({'error': 'Missing userId'})
+        return _add_cors_headers(resp), 400
+
+    try:
+        from failed_recovery_service import FailedRecoveryService
+        service = FailedRecoveryService()
+        result = service.recover_failed_transactions(user_id)
+        resp = jsonify(result)
+        return _add_cors_headers(resp), 200
+    except Exception as exc:
+        app.logger.exception('Failed transaction recovery error: %s', exc)
+        resp = jsonify({'error': 'Internal server error'})
+        return _add_cors_headers(resp), 500
+
+
 @app.route('/paybill-verification', methods=['POST', 'OPTIONS'])
 def paybill_verification():
     """
