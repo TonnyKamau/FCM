@@ -163,6 +163,7 @@ def create_sale(group_id):
     sale_collection = C.CREDIT_SALE if is_credit else C.CASH_SALE
 
     created_sales = []
+    stock_out_ids = []   # parallel list — one stock_out_id per item, used below
     total = 0.0
     batch = db.batch()
 
@@ -218,33 +219,14 @@ def create_sale(group_id):
 
         created_sales.append(sale_to_dict(sale_id, sale_data))
 
-        # Deduct stock — new backend: flat PRODUCTS collection
-        stock_deducted = False
-        product_doc = db.collection(C.PRODUCTS).document(product_id).get()
-        if product_doc.exists and product_doc.to_dict().get("group_id") == group_id:
-            current_stock = int(product_doc.to_dict().get("available_stock", 0) or 0)
-            batch.update(product_doc.reference, {"available_stock": max(0, current_stock - quantity)})
-            stock_deducted = True
+        # ── Stock deduction is handled by the Flutter app via PUT /adjust-stock.
+        # Do NOT deduct here to avoid double-deducting.
 
-        if not stock_deducted:
-            try:
-                orig_prod_ref = db.collection(C.PRODUCTS).document(group_id)
-                orig_prod_doc = orig_prod_ref.get()
-                if orig_prod_doc.exists:
-                    prod_data = (orig_prod_doc.to_dict() or {}).get(product_id)
-                    if isinstance(prod_data, dict):
-                        cur_stk = int(
-                            prod_data.get("available_stock") or
-                            prod_data.get("availableStock") or 0
-                        )
-                        batch.update(orig_prod_ref, {
-                            f"{product_id}.available_stock": max(0, cur_stk - quantity),
-                        })
-            except Exception:
-                pass
-
-        # Record stock out (new flat format)
-        batch.set(db.collection(C.STOCK_OUT).document(str(uuid.uuid4())), {
+        # Record stock out — use a single shared ID so all three write formats
+        # deduplicate to one entry when list_stock_out() reads them back.
+        stock_out_id = str(uuid.uuid4())
+        stock_out_ids.append(stock_out_id)
+        batch.set(db.collection(C.STOCK_OUT).document(stock_out_id), {
             "group_id":       group_id,
             "product_id":     product_id,
             "name":           product_name,
@@ -253,6 +235,7 @@ def create_sale(group_id):
             "measuring_unit": item.get("measuringUnit", "pcs"),
             "quantity":       quantity,
             "date":           now,
+            "id":             stock_out_id,
         })
 
     # Build sale description
@@ -409,12 +392,12 @@ def create_sale(group_id):
             pass
 
         # ── Write STOCK_OUT to original formats ───────────────────────────────
-        for item in items:
+        for item, stock_out_id in zip(items, stock_out_ids):
             prod_name_so = item.get("productName", "")
             if not prod_name_so:
                 continue
             so_entry = {
-                "id":             "",
+                "id":             stock_out_id,
                 "product_id":     item.get("productId", ""),
                 "name":           prod_name_so,
                 "measuring_unit": item.get("measuringUnit", "pcs"),
@@ -426,19 +409,15 @@ def create_sale(group_id):
             }
             # Windows Flutter format: STOCK_OUT/{productName} → { stockId: {...} }
             try:
-                win_id = str(uuid.uuid4())
-                so_entry["id"] = win_id
                 db.collection(C.STOCK_OUT).document(prod_name_so).set(
-                    {win_id: so_entry}, merge=True
+                    {stock_out_id: so_entry}, merge=True
                 )
             except Exception:
                 pass
             # Android format: STOCK_OUT/{groupId} → { outId: {...} }
             try:
-                and_id = str(uuid.uuid4())
-                so_entry["id"] = and_id
                 db.collection(C.STOCK_OUT).document(group_id).set(
-                    {and_id: so_entry}, merge=True
+                    {stock_out_id: so_entry}, merge=True
                 )
             except Exception:
                 pass

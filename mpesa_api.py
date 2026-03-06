@@ -9,8 +9,9 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from config import (
     MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET, MPESA_PASSKEY,
     MPESA_BUSINESS_SHORT_CODE, MPESA_INITIATOR_NAME, MPESA_INITIATOR_PASSWORD,
-    MPESA_AUTH_URL, MPESA_STK_QUERY_URL, MPESA_TRANSACTION_STATUS_URL,
-    MPESA_B2C_RESULT_URL, MPESA_B2C_TIMEOUT_URL
+    MPESA_AUTH_URL, MPESA_STK_PUSH_URL, MPESA_STK_QUERY_URL,
+    MPESA_TRANSACTION_STATUS_URL, MPESA_B2C_RESULT_URL, MPESA_B2C_TIMEOUT_URL,
+    MPESA_STK_CALLBACK_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,67 @@ class MpesaAPI:
         except Exception as e:
             logger.error("Failed to generate security credential: %s", e)
             return None
+
+    @staticmethod
+    def format_phone(phone: str) -> str:
+        """Normalises a Kenyan phone to 2547XXXXXXXX — mirrors DirectDepositActivity.formatPhoneNumber()."""
+        phone = phone.replace(" ", "").replace("-", "")
+        if phone.startswith("0"):
+            return "254" + phone[1:]
+        if not phone.startswith("254"):
+            return "254" + phone
+        return phone
+
+    def stk_push(self, phone: str, amount: int, account_reference: str,
+                 callback_url: str = None) -> tuple:
+        """
+        Initiates an STK push to the customer's phone.
+
+        Mirrors the Android DirectDepositActivity.performStkPush() flow:
+          1. Obtain OAuth token via get_access_token()
+          2. Build Password = Base64(BusinessShortCode + Passkey + Timestamp)
+          3. POST to /mpesa/stkpush/v1/processrequest
+
+        Returns (data_dict, error_string).  error_string is None on success.
+        """
+        token = self.get_access_token()
+        if not token:
+            return None, "Failed to obtain M-Pesa access token"
+
+        phone = self.format_phone(phone)
+        callback_url = callback_url or MPESA_STK_CALLBACK_URL
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        password = base64.b64encode(
+            (MPESA_BUSINESS_SHORT_CODE + MPESA_PASSKEY + timestamp).encode()
+        ).decode()
+
+        payload = {
+            "BusinessShortCode": MPESA_BUSINESS_SHORT_CODE,
+            "Password":          password,
+            "Timestamp":         timestamp,
+            "TransactionType":   "CustomerPayBillOnline",
+            "Amount":            str(int(amount)),
+            "PartyA":            phone,
+            "PartyB":            MPESA_BUSINESS_SHORT_CODE,
+            "PhoneNumber":       phone,
+            "CallBackURL":       callback_url,
+            "AccountReference":  account_reference,
+            "TransactionDesc":   "POS Payment",
+        }
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        }
+
+        try:
+            resp = requests.post(MPESA_STK_PUSH_URL, json=payload,
+                                 headers=headers, timeout=30)
+            return resp.json(), None
+        except Exception as e:
+            logger.error("STK push request failed: %s", e)
+            return None, str(e)
 
     def query_stk_push_status(self, checkout_request_id):
         """Synchronously queries the status of an STK push."""

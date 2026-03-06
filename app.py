@@ -17,6 +17,7 @@ from routes.licenses import licenses_bp
 from routes.notifications import notifications_bp
 from routes.expenses import expenses_bp, income_bp
 from routes.reports import reports_bp
+from routes.mpesa import mpesa_bp
 
 app = Flask(__name__)
 app.config["API_KEY"] = API_KEY
@@ -342,6 +343,7 @@ app.register_blueprint(notifications_bp)
 app.register_blueprint(expenses_bp)
 app.register_blueprint(income_bp)
 app.register_blueprint(reports_bp)
+app.register_blueprint(mpesa_bp)
 
 
 @app.after_request
@@ -392,6 +394,9 @@ def _cors(response):
 @app.route("/licenses/<license_id>/use", methods=["OPTIONS"])
 @app.route("/licenses/<license_id>/send-email", methods=["OPTIONS"])
 @app.route("/notifications/send", methods=["OPTIONS"])
+@app.route("/mpesa/stk-push", methods=["OPTIONS"])
+@app.route("/mpesa/stk-query", methods=["OPTIONS"])
+@app.route("/mpesa/stk-callback", methods=["OPTIONS"])
 def _preflight(**_):
     """Handle CORS preflight for all kit-ifms routes."""
     return "", 204
