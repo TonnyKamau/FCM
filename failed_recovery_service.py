@@ -132,9 +132,13 @@ class FailedRecoveryService:
         for month_col in user_ref.collections():
             for doc in month_col.stream():
                 data = doc.to_dict() or {}
+                payment_method = data.get("paymentMethod") or ""
                 if (
                     data.get("status") == "FAILED"
-                    and (data.get("paymentMethod") or "") == "Direct Mobile - Request error: timeout"
+                    and (
+                        payment_method == "Direct Mobile - Request error: timeout"
+                        or payment_method.startswith("Direct Mobile - HTTP Error:")
+                    )
                     and int(data.get("timestamp", 0)) >= cutoff_ms
                 ):
                     failed.append(
