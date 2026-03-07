@@ -49,20 +49,19 @@ def get_nairobi_time(date_obj):
     return date_obj.astimezone(nairobi_tz)
 
 def parse_formatted_date(date_str):
-    """Parse FORMATTED_DATE string (e.g. '2024-05-23 14:30:00') to datetime object."""
+    """Parse FORMATTED_DATE string (e.g. '2024-05-23 14:30:00') to naive datetime object."""
     try:
         # Split by -, space, or :
         parts = re.split(r'[- :]', date_str)
         parts = [int(p) for p in parts if p]
         
         if len(parts) >= 6:
-            # Create datetime object (assuming the string is already in Nairobi time or local)
-            dt = datetime(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5])
-            return get_nairobi_time(dt)
+            # Return naive datetime — consistent with what MongoDB stores
+            return datetime(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5])
     except Exception as e:
         print(f"Warning: Invalid date format '{date_str}': {e}")
     
-    return get_nairobi_time(datetime.now())
+    return datetime.now()
 
 def fetch_transactions_with_retry(url, retries=3, timeout=10):
     headers = {
@@ -126,22 +125,30 @@ def sync_transactions():
         if active_sessions_count > 0 and not active_sessions:
             print("Warning: Active sessions found but user lookup failed")
 
-        # FETCH RECENT CODES: Get last 200 transaction codes to avoid redundant DB checks
-        print("Pre-fetching recent transaction codes...")
-        recent_txs = list(transactions_collection.find({}, {"transactionCode": 1})
-                          .sort("transactionDate", -1)
-                          .limit(200))
-        recent_codes_set = {tx.get("transactionCode") for tx in recent_txs if tx.get("transactionCode")}
-        print(f"Loaded {len(recent_codes_set)} recent codes into cache.")
+        # WATERMARK: Find the latest transaction date already in MongoDB
+        print("Finding latest synced transaction date...")
+        latest_tx = transactions_collection.find_one(
+            {}, sort=[("transactionDate", -1)]
+        )
+        if latest_tx and latest_tx.get("transactionDate"):
+            latest_synced_date = latest_tx["transactionDate"]
+            # Ensure naive datetime for consistent comparison
+            if hasattr(latest_synced_date, 'tzinfo') and latest_synced_date.tzinfo is not None:
+                latest_synced_date = latest_synced_date.replace(tzinfo=None)
+            print(f"Latest synced date: {latest_synced_date}")
+        else:
+            latest_synced_date = None
+            print("No transactions in DB yet — will sync all.")
 
         # Fetch transactions from PHP API
         php_transactions = fetch_transactions_with_retry(PHP_API_URL, timeout=12)
         print(f"Fetched {len(php_transactions)} transactions from PHP API")
-        
-        user_balances = {}  # userId -> {balance, date}
-        consecutive_existing = 0
-        STOP_THRESHOLD = 50 # Stop if we see 50 already-synced transactions in a row (if sorted)
-        
+
+        user_balances = {}       # userId -> {balance, date}
+        new_count = 0
+        skipped_old = 0
+        skipped_dup = 0
+
         for t in php_transactions:
             try:
                 # Parse Data
@@ -151,39 +158,31 @@ def sync_transactions():
                 customer = t.get("CUSTOMER")
                 raw_date = t.get("FORMATTED_DATE", "")
                 tx_type = t.get("TYPE", "")
-                
+
                 date_obj = parse_formatted_date(raw_date)
-                
-                # Check duplication locally first (High performance)
-                if transaction_code in recent_codes_set:
-                    consecutive_existing += 1
-                    if consecutive_existing >= STOP_THRESHOLD:
-                        print(f"Hit {STOP_THRESHOLD} consecutive existing transactions. Early exit.")
-                        break
+
+                # FAST PATH: Skip anything we've already synced (older than or equal to watermark)
+                if latest_synced_date is not None and date_obj <= latest_synced_date:
+                    skipped_old += 1
                     continue
-                
-                # Double check with DB just in case it's older than the pre-fetched list
+
+                # DB duplicate check only for records newer than the watermark
                 existing_tx = transactions_collection.find_one({"transactionCode": transaction_code})
-                
-                # Reset consecutive counter if it's new
-                if not existing_tx:
-                    consecutive_existing = 0
-                else:
-                    recent_codes_set.add(transaction_code) # Add to set for next pass
-                    print(f"Transaction {transaction_code} already exists in DB, skipping")
+                if existing_tx:
+                    print(f"Transaction {transaction_code} already exists, skipping")
+                    skipped_dup += 1
                     continue
-                
+
                 # Create New Transaction
-                # Only if we have at least one active user (as per Node.js logic)
                 if active_sessions:
-                    # Update User Balances Logic (Only for NEW transactions to avoid redundant processing)
+                    # Track latest balance for each user
                     for session in active_sessions:
                         user_id = str(session["userId"])
                         if user_id not in user_balances or date_obj > user_balances[user_id]["date"]:
                             user_balances[user_id] = {"balance": account_balance, "date": date_obj}
 
                     primary_user_id = active_sessions[0]["userId"]
-                    
+
                     new_tx = {
                         "user": primary_user_id,
                         "customer": customer,
@@ -195,17 +194,22 @@ def sync_transactions():
                         "accountBalance": account_balance,
                         "createdAt": datetime.now()
                     }
-                    
+
                     try:
                         transactions_collection.insert_one(new_tx)
                         print(f"Saved transaction {transaction_code} for user {primary_user_id}")
+                        new_count += 1
                     except DuplicateKeyError:
-                        print(f"Transaction {transaction_code} already exists (unique constraint), skipping")
+                        print(f"Transaction {transaction_code} duplicate key, skipping")
+                        skipped_dup += 1
                 else:
-                    print(f"No active session to assign transaction {transaction_code} to. Skipping save.")
-                    
+                    print(f"No active session — skipping transaction {transaction_code}")
+
             except Exception as e:
                 print(f"Error processing transaction {t.get('TRANSACTION CODE')}: {e}")
+
+        print(f"\nSync summary: {new_count} new, {skipped_old} old (before watermark), {skipped_dup} duplicates")
+
 
         # Update Users Balances
         for user_id, data in user_balances.items():
