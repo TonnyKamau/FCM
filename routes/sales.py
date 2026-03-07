@@ -6,8 +6,35 @@ import db_constants as C
 import logging
 import uuid
 from datetime import datetime, timezone
+from google.cloud.firestore import Increment
 
 sales_bp = Blueprint("sales", __name__, url_prefix="/groups/<group_id>/sales")
+
+
+def _increment_group_account_balance(db, group_id, amount):
+    """Atomically add `amount` to the savings GroupAccount balance.
+
+    Path: GroupAccounts/{group_id}/accounts  (query accountType == "savings")
+    Falls back silently — a balance update failure must never block the sale.
+    """
+    try:
+        accounts_ref = (
+            db.collection("GroupAccounts")
+            .document(group_id)
+            .collection("accounts")
+        )
+        savings_docs = list(
+            accounts_ref.where("accountType", "==", "savings").limit(1).get()
+        )
+        if not savings_docs:
+            # Also try "NORMAL" which some older Android versions write
+            savings_docs = list(
+                accounts_ref.where("accountType", "==", "NORMAL").limit(1).get()
+            )
+        if savings_docs:
+            savings_docs[0].reference.update({"balance": Increment(amount)})
+    except Exception as e:
+        logging.exception("_increment_group_account_balance error (%s): %s", group_id, e)
 
 
 def _check_member(db, group_id, uid):
@@ -157,6 +184,7 @@ def create_sale(group_id):
     admin_id = admin_id or uid
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     is_credit = data.get("isCredit", False)
+    payment_method = data.get("paymentMethod", "cash")
     customer_id = data.get("customerId", "")
     person_name = data.get("personName", "Walk-in Customer")
 
@@ -190,6 +218,7 @@ def create_sale(group_id):
             "customer_id":    customer_id,
             "payment_status": not is_credit,
             "is_credit":      is_credit,
+            "payment_method": payment_method,
             "created_by":     uid,
             "date":           now,
         }
@@ -298,6 +327,10 @@ def create_sale(group_id):
                 pass
 
     batch.commit()
+
+    # ── Increment savings group account balance for M-Pesa sales only ─────────
+    if not is_credit and payment_method == "mpesa":
+        _increment_group_account_balance(db, group_id, total)
 
     # ── After commit: post sale notification + update CHATS (fire-and-forget) ──
     try:
