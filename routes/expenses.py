@@ -18,6 +18,7 @@ from firebase_utils import get_db
 from auth_utils import require_auth, get_jwt_identity
 import uuid
 from datetime import datetime, timezone
+from cache_utils import cached_is_member
 
 # ── Firestore collection names ────────────────────────────────────────────────
 _EXPENSES       = "EXPENSES"
@@ -91,7 +92,7 @@ def _check_member(db, group_id, uid):
 def _list(group_id, is_expense_flag):
     uid = get_jwt_identity()
     db  = get_db()
-    is_mem, admin_id = _check_member(db, group_id, uid)
+    is_mem, admin_id = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
@@ -129,7 +130,7 @@ def _list(group_id, is_expense_flag):
 def _create(group_id, is_expense_flag):
     uid = get_jwt_identity()
     db  = get_db()
-    is_mem, admin_id = _check_member(db, group_id, uid)
+    is_mem, admin_id = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
@@ -162,7 +163,7 @@ def _create(group_id, is_expense_flag):
 def _update(group_id, entry_id, is_expense_flag):
     uid = get_jwt_identity()
     db  = get_db()
-    is_mem, _ = _check_member(db, group_id, uid)
+    is_mem, _ = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
@@ -192,7 +193,7 @@ def _update(group_id, entry_id, is_expense_flag):
 def _delete(group_id, entry_id, is_expense_flag):
     uid = get_jwt_identity()
     db  = get_db()
-    is_mem, _ = _check_member(db, group_id, uid)
+    is_mem, _ = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 

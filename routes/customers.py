@@ -5,6 +5,7 @@ from auth_utils import require_auth, get_jwt_identity
 import db_constants as C
 import uuid
 from datetime import datetime, timezone
+from cache_utils import cached_is_member
 
 customers_bp = Blueprint("customers", __name__, url_prefix="/groups/<group_id>/customers")
 
@@ -40,7 +41,8 @@ def _is_member(db, group_id, uid):
 def list_customers(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     # ── Source 1: new backend — flat Customers collection with group_id field ─
@@ -70,7 +72,8 @@ def list_customers(group_id):
 def create_customer(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     data = request.get_json() or {}
@@ -125,7 +128,8 @@ def create_customer(group_id):
 def update_customer(group_id, customer_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     doc = db.collection(C.CUSTOMERS).document(customer_id).get()
@@ -177,7 +181,8 @@ def update_customer(group_id, customer_id):
 def delete_customer(group_id, customer_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
     doc = db.collection(C.CUSTOMERS).document(customer_id).get()
     if not doc.exists or doc.to_dict().get("group_id") != group_id:
@@ -191,7 +196,8 @@ def delete_customer(group_id, customer_id):
 def record_payment(group_id, customer_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     cust_doc = db.collection(C.CUSTOMERS).document(customer_id).get()
@@ -291,7 +297,8 @@ def record_payment(group_id, customer_id):
 def list_payments(group_id, customer_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     pay_map = {}

@@ -5,6 +5,10 @@ from auth_utils import require_auth, get_jwt_identity
 import db_constants as C
 import uuid
 from datetime import datetime, timezone
+from cache_utils import (
+    cached_is_member, invalidate_products,
+    get_cached_products, set_cached_products,
+)
 
 products_bp = Blueprint("products", __name__, url_prefix="/groups/<group_id>/products")
 
@@ -40,8 +44,14 @@ def _is_member(db, group_id, uid):
 def list_products(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
+
+    # Return cached response if fresh (avoids repeated dual-source reads)
+    cached = get_cached_products(group_id)
+    if cached is not None:
+        return jsonify({"products": cached})
 
     # ── Source 1: new backend — flat PRODUCTS collection with group_id field ──
     docs = db.collection(C.PRODUCTS).where("group_id", "==", group_id).get()
@@ -108,6 +118,7 @@ def list_products(group_id):
         pass
 
     products = sorted(product_map.values(), key=lambda p: p["name"])
+    set_cached_products(group_id, products)
     return jsonify({"products": products})
 
 
@@ -175,6 +186,7 @@ def create_product(group_id):
     except Exception:
         pass  # non-fatal: Flutter app still works via flat docs
 
+    invalidate_products(group_id)
     return jsonify({"product": product_to_dict(product_id, product_data)}), 201
 
 
@@ -226,6 +238,7 @@ def update_product(group_id, product_id):
     except Exception:
         pass
 
+    invalidate_products(group_id)
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})
 
 
@@ -248,6 +261,7 @@ def delete_product(group_id, product_id):
     except Exception:
         pass
 
+    invalidate_products(group_id)
     return jsonify({"message": "Product deleted"})
 
 
@@ -268,14 +282,14 @@ def adjust_stock(group_id, product_id):
     new_stock = max(0, current_stock + delta)
     doc.reference.update({"available_stock": new_stock})
 
-    # Also update the Android map document so the merge in list_products
-    # does not overwrite the adjusted value on the next poll.
+    # Mirror to Android map doc — set(merge=True) avoids a pre-read existence check
     try:
-        android_ref = db.collection(C.PRODUCTS).document(group_id)
-        if android_ref.get().exists:
-            android_ref.update({f"{product_id}.available_stock": new_stock})
+        db.collection(C.PRODUCTS).document(group_id).set(
+            {product_id: {"available_stock": new_stock}}, merge=True
+        )
     except Exception:
         pass
 
+    invalidate_products(group_id)
     updated = db.collection(C.PRODUCTS).document(product_id).get()
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})

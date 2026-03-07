@@ -7,6 +7,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from google.cloud.firestore import Increment
+from cache_utils import cached_is_member
 
 sales_bp = Blueprint("sales", __name__, url_prefix="/groups/<group_id>/sales")
 
@@ -138,7 +139,7 @@ def _build_stock_card(db, group_id, items, now):
 def list_sales(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    is_mem, _ = _check_member(db, group_id, uid)
+    is_mem, _ = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
@@ -172,7 +173,7 @@ def list_sales(group_id):
 def create_sale(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    is_mem, admin_id = _check_member(db, group_id, uid)
+    is_mem, admin_id = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
@@ -455,75 +456,8 @@ def create_sale(group_id):
             except Exception:
                 pass
 
-        # ── Send stock card message to group chat ────────────────────────────
-        try:
-            stock_card_msg = _build_stock_card(db, group_id, items, now)
-            sc_id  = str(uuid.uuid4())
-            sc_ts  = now + 1000
-
-            db.collection(C.MESSAGES).document(group_id).set({
-                sc_id: {
-                    "id":            sc_id,
-                    "senderID":      uid,
-                    "senderName":    "Stock Update",
-                    "receiverID":    "",
-                    "receiverName":  "",
-                    "chatID":        group_id,
-                    "isGroup":       True,
-                    "isMoneyShared": False,
-                    "isImageShared": False,
-                    "isPoll":        False,
-                    "isLoanRequest": False,
-                    "money":         "",
-                    "image":         "",
-                    "caption":       "",
-                    "message":       stock_card_msg,
-                    "timestamp":     sc_ts,
-                }
-            }, merge=True)
-
-            db.collection(C.MESSAGES).document(sc_id).set({
-                "group_id":        group_id,
-                "sender_id":       uid,
-                "sender_name":     "Stock Update",
-                "message":         stock_card_msg,
-                "is_group":        True,
-                "is_money_shared": False,
-                "is_image_shared": False,
-                "is_poll":         False,
-                "is_loan_request": False,
-                "money":           "",
-                "image":           "",
-                "caption":         "",
-                "timestamp":       sc_ts,
-            })
-
-            sc_last = f"Stock Update: {stock_card_msg}"
-            sc_chat_update = {
-                f"{group_id}.timestamp":     sc_ts,
-                f"{group_id}.lastMessage":   sc_last,
-                f"{group_id}.isMoneyShared": False,
-                f"{group_id}.isImageShared": False,
-                f"{group_id}.isGroup":       True,
-                f"{group_id}.senderName":    "Stock Update",
-            }
-            db.collection(C.CHATS).document(uid).set(sc_chat_update, merge=True)
-            for gm in gm_docs:
-                m_uid = gm.to_dict().get("user_id", "")
-                if m_uid and m_uid != uid:
-                    db.collection(C.CHATS).document(m_uid).set(
-                        sc_chat_update, merge=True
-                    )
-
-            try:
-                db.collection(C.GROUP_ACCOUNTS).document(group_id).update({
-                    "last_message": sc_last,
-                    "timestamp":    sc_ts,
-                })
-            except Exception:
-                pass
-        except Exception:
-            pass  # stock card failure must not block
+        # Stock card chat message removed — it queried all sales docs on every
+        # sale and was the largest source of unnecessary Firestore reads.
 
     except Exception:
         pass  # notification failure must never block the sale response
@@ -536,7 +470,7 @@ def create_sale(group_id):
 def mark_paid(group_id, sale_id):
     uid = get_jwt_identity()
     db = get_db()
-    is_mem, _ = _check_member(db, group_id, uid)
+    is_mem, _ = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
