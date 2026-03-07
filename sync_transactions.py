@@ -126,11 +126,21 @@ def sync_transactions():
         if active_sessions_count > 0 and not active_sessions:
             print("Warning: Active sessions found but user lookup failed")
 
+        # FETCH RECENT CODES: Get last 200 transaction codes to avoid redundant DB checks
+        print("Pre-fetching recent transaction codes...")
+        recent_txs = list(transactions_collection.find({}, {"transactionCode": 1})
+                          .sort("transactionDate", -1)
+                          .limit(200))
+        recent_codes_set = {tx.get("transactionCode") for tx in recent_txs if tx.get("transactionCode")}
+        print(f"Loaded {len(recent_codes_set)} recent codes into cache.")
+
         # Fetch transactions from PHP API
         php_transactions = fetch_transactions_with_retry(PHP_API_URL, timeout=12)
         print(f"Fetched {len(php_transactions)} transactions from PHP API")
         
         user_balances = {}  # userId -> {balance, date}
+        consecutive_existing = 0
+        STOP_THRESHOLD = 50 # Stop if we see 50 already-synced transactions in a row (if sorted)
         
         for t in php_transactions:
             try:
@@ -144,26 +154,34 @@ def sync_transactions():
                 
                 date_obj = parse_formatted_date(raw_date)
                 
-                # Check duplication
+                # Check duplication locally first (High performance)
+                if transaction_code in recent_codes_set:
+                    consecutive_existing += 1
+                    if consecutive_existing >= STOP_THRESHOLD:
+                        print(f"Hit {STOP_THRESHOLD} consecutive existing transactions. Early exit.")
+                        break
+                    continue
+                
+                # Double check with DB just in case it's older than the pre-fetched list
                 existing_tx = transactions_collection.find_one({"transactionCode": transaction_code})
                 
-                # Update User Balances Logic
-                # We update balances for ALL active users based on the latest transaction date seen
-                for session in active_sessions:
-                    user_id = str(session["userId"])
-                    
-                    if user_id not in user_balances:
-                        user_balances[user_id] = {"balance": account_balance, "date": date_obj}
-                    elif date_obj > user_balances[user_id]["date"]:
-                        user_balances[user_id] = {"balance": account_balance, "date": date_obj}
-
-                if existing_tx:
-                    print(f"Transaction {transaction_code} already exists, skipping record sync")
+                # Reset consecutive counter if it's new
+                if not existing_tx:
+                    consecutive_existing = 0
+                else:
+                    recent_codes_set.add(transaction_code) # Add to set for next pass
+                    print(f"Transaction {transaction_code} already exists in DB, skipping")
                     continue
                 
                 # Create New Transaction
                 # Only if we have at least one active user (as per Node.js logic)
                 if active_sessions:
+                    # Update User Balances Logic (Only for NEW transactions to avoid redundant processing)
+                    for session in active_sessions:
+                        user_id = str(session["userId"])
+                        if user_id not in user_balances or date_obj > user_balances[user_id]["date"]:
+                            user_balances[user_id] = {"balance": account_balance, "date": date_obj}
+
                     primary_user_id = active_sessions[0]["userId"]
                     
                     new_tx = {

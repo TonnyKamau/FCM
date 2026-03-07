@@ -52,8 +52,58 @@ def list_products(group_id):
         orig_doc = db.collection(C.PRODUCTS).document(group_id).get()
         if orig_doc.exists:
             for prod_id, prod_data in (orig_doc.to_dict() or {}).items():
-                if isinstance(prod_data, dict) and prod_id not in product_map:
+                if not isinstance(prod_data, dict):
+                    continue
+                if prod_id not in product_map:
+                    # Product only exists in Android format — add it
                     product_map[prod_id] = product_to_dict(prod_id, prod_data)
+                else:
+                    # Product exists in both sources.
+                    # Android is the authoritative writer for its own fields
+                    # (stock adjustments, image updates, price edits done in the
+                    # Android app all land in the map doc). Merge every field
+                    # that differs and back-fill the flat doc so future reads are
+                    # already consistent without needing this merge step.
+                    android_parsed = product_to_dict(prod_id, prod_data)
+                    flat = product_map[prod_id]
+
+                    # Fields that Android manages and may update independently
+                    merge_fields = [
+                        ("available_stock", "available_stock"),
+                        ("image",           "image"),
+                        ("unit_price",      "unit_price"),
+                        ("buying_price",    "buying_price"),
+                        ("wholesale_price", "wholesale_price"),
+                        ("special_price",   "special_price"),
+                        ("reorder_level",   "reorder_level"),
+                        ("name",            "name"),
+                        ("desc",            "desc"),
+                    ]
+                    backfill = {}
+                    for resp_key, _ in merge_fields:
+                        android_val = android_parsed.get(resp_key)
+                        flat_val    = flat.get(resp_key)
+                        if android_val is not None and android_val != flat_val:
+                            flat[resp_key] = android_val
+                            # Map response key → Firestore field name
+                            fs_key = {
+                                "available_stock": "available_stock",
+                                "image":           "image",
+                                "unit_price":      "unit_price",
+                                "buying_price":    "buying_price",
+                                "wholesale_price": "wholesale_price",
+                                "special_price":   "special_price",
+                                "reorder_level":   "reorder_level",
+                                "name":            "name",
+                                "desc":            "description",
+                            }.get(resp_key, resp_key)
+                            backfill[fs_key] = android_val
+
+                    if backfill:
+                        try:
+                            db.collection(C.PRODUCTS).document(prod_id).update(backfill)
+                        except Exception:
+                            pass
     except Exception:
         pass
 
@@ -96,6 +146,35 @@ def create_product(group_id):
         "is_active":       bool (data.get("is_active",    True) if "is_active" in data else data.get("isActive", True)),
     }
     db.collection(C.PRODUCTS).document(product_id).set(product_data)
+
+    # Also write into the Android map-document format so the Android app sees it
+    # PRODUCTS/{groupId} is a single document whose keys are product IDs
+    android_data = {
+        "name":            product_data["name"],
+        "description":     product_data["description"],
+        "image":           product_data["image"],
+        "buying_price":    product_data["buying_price"],
+        "unit_price":      product_data["unit_price"],
+        "available_stock": product_data["available_stock"],
+        "reorder_level":   product_data["reorder_level"],
+        "measuring_unit":  product_data["measuring_unit"],
+        "category":        product_data["category"],
+        "date":            product_data["created_at"],
+        "barcode":         product_data["barcode"],
+        "code":            product_data["code"],
+        "wholesale_price": product_data["wholesale_price"],
+        "special_price":   product_data["special_price"],
+        "tax_rate":        product_data["tax_rate"],
+        "is_active":       product_data["is_active"],
+        "id":              product_id,
+    }
+    try:
+        db.collection(C.PRODUCTS).document(group_id).set(
+            {product_id: android_data}, merge=True
+        )
+    except Exception:
+        pass  # non-fatal: Flutter app still works via flat docs
+
     return jsonify({"product": product_to_dict(product_id, product_data)}), 201
 
 
@@ -139,6 +218,14 @@ def update_product(group_id, product_id):
 
     doc.reference.update(updates)
     updated = db.collection(C.PRODUCTS).document(product_id).get()
+
+    # Mirror update into Android map-document format
+    try:
+        android_updates = {f"{product_id}.{k}": v for k, v in updates.items()}
+        db.collection(C.PRODUCTS).document(group_id).update(android_updates)
+    except Exception:
+        pass
+
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})
 
 
@@ -153,6 +240,14 @@ def delete_product(group_id, product_id):
     if not doc.exists or doc.to_dict().get("group_id") != group_id:
         return jsonify({"error": "Product not found"}), 404
     doc.reference.delete()
+
+    # Remove from Android map-document format too
+    try:
+        from google.cloud.firestore import DELETE_FIELD
+        db.collection(C.PRODUCTS).document(group_id).update({product_id: DELETE_FIELD})
+    except Exception:
+        pass
+
     return jsonify({"message": "Product deleted"})
 
 
@@ -170,6 +265,17 @@ def adjust_stock(group_id, product_id):
     data = request.get_json() or {}
     delta = int(data.get("delta", 0))
     current_stock = doc.to_dict().get("available_stock", 0)
-    doc.reference.update({"available_stock": max(0, current_stock + delta)})
+    new_stock = max(0, current_stock + delta)
+    doc.reference.update({"available_stock": new_stock})
+
+    # Also update the Android map document so the merge in list_products
+    # does not overwrite the adjusted value on the next poll.
+    try:
+        android_ref = db.collection(C.PRODUCTS).document(group_id)
+        if android_ref.get().exists:
+            android_ref.update({f"{product_id}.available_stock": new_stock})
+    except Exception:
+        pass
+
     updated = db.collection(C.PRODUCTS).document(product_id).get()
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})
