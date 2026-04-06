@@ -77,8 +77,15 @@ class FailedRecoveryService:
                 tx_code = match.get("TRANSACTION CODE", "")
                 used_codes.add(tx_code)  # prevent same code matching another tx
 
-                # Mark FAILED → DONE in Firestore
-                self._mark_transaction_done(tx["doc_ref"], tx_code)
+                # Mark FAILED → DONE in Firestore (atomic — returns False if another
+                # concurrent request already won the race for this transaction).
+                marked = self._mark_transaction_done(tx["doc_ref"], tx_code)
+                if not marked:
+                    logger.info(
+                        "Recovery: tx %s already handled by concurrent request — skipping",
+                        tx["id"],
+                    )
+                    continue
 
                 # Credit balance (atomic Firestore Increment)
                 self.payment_service._update_user_balance(
@@ -210,15 +217,50 @@ class FailedRecoveryService:
 
         return None
 
-    def _mark_transaction_done(self, doc_ref: Any, transaction_code: str) -> None:
-        doc_ref.update(
-            {
-                "status": "DONE",
-                "transactionCode": transaction_code,
-                "paymentMethod": "Direct Mobile - Recovered",
-                "recoveredAt": int(time.time() * 1000),
-            }
-        )
+    def _mark_transaction_done(self, doc_ref: Any, transaction_code: str) -> bool:
+        """
+        Atomically transitions a FAILED transaction to DONE.
+
+        Uses a Firestore transaction to guard against concurrent recovery
+        requests (e.g. two app instances calling /recover-failed-transactions
+        simultaneously) both matching the same FAILED transaction and both
+        crediting the balance.
+
+        Returns True if this caller won the race (transition succeeded),
+        False if the document was already DONE by another caller.
+        """
+        from google.cloud import firestore as _fs
+
+        @_fs.transactional
+        def _do_mark(txn: Any, ref: Any) -> bool:
+            snap = ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+            current_status = (snap.to_dict() or {}).get("status", "")
+            if current_status != "FAILED":
+                logger.info(
+                    "Recovery: transaction %s already in status=%s — skipping",
+                    snap.id,
+                    current_status,
+                )
+                return False
+            txn.update(
+                ref,
+                {
+                    "status": "DONE",
+                    "transactionCode": transaction_code,
+                    "paymentMethod": "Direct Mobile - Recovered",
+                    "recoveredAt": int(time.time() * 1000),
+                },
+            )
+            return True
+
+        try:
+            txn = self.db.transaction()
+            return _do_mark(txn, doc_ref)
+        except Exception as exc:
+            logger.exception("_mark_transaction_done error: %s", exc)
+            return False
 
     def _send_recovery_notification(
         self, user_id: str, results: List[Dict[str, Any]]

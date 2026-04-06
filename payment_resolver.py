@@ -127,16 +127,29 @@ class PaymentResolverService:
                 stk_tx_code = php_result.get("transactionCode", stk_tx_code)
                 logger.info(f"STK tx {tx_id} resolved via PHP — code={stk_tx_code}")
             else:
-                # PHP not updated yet — write DONE directly
-                self._mark_transaction_done(
-                    user_id, month, tx_id, "DONE",
-                    extra_fields={
-                        "transactionCode": stk_tx_code,
-                        "paymentMethod":   "Direct Mobile - Verified",
-                    }
+                # PHP not updated yet — attempt to atomically mark DONE directly.
+                # _update_transaction_in_firestore uses a Firestore transaction so
+                # only ONE concurrent caller (worker/cron) can win.  If another path
+                # already confirmed this transaction the call returns False and we
+                # must NOT credit the balance again.
+                updated = self.payment_service._update_transaction_in_firestore(
+                    user_id, merchant_request_id, stk_tx_code
                 )
-                self.payment_service._update_user_balance(user_id, account_type, amount)
-                logger.info(f"STK tx {tx_id} resolved directly — code={stk_tx_code}")
+                if updated:
+                    self._mark_transaction_done(
+                        user_id, month, tx_id, "DONE",
+                        extra_fields={
+                            "transactionCode": stk_tx_code,
+                            "paymentMethod":   "Direct Mobile - Verified",
+                        }
+                    )
+                    self.payment_service._update_user_balance(user_id, account_type, amount)
+                    logger.info(f"STK tx {tx_id} resolved directly — code={stk_tx_code}")
+                else:
+                    logger.info(
+                        f"STK tx {tx_id} already confirmed by another path — "
+                        "skipping balance credit to prevent double-crediting"
+                    )
 
         # ── Cancelled by user ─────────────────────────────────────────
         elif result_code == 1032:

@@ -145,8 +145,19 @@ class PaybillVerificationService:
             return {"success": False, "error": str(exc)}
 
     def _update_user_balance(self, user_id: str, amount: float) -> Dict[str, Any]:
-        """Update user balance in SAVINGS/{userId}/accounts/NORMAL."""
+        """Update user balance in SAVINGS/{userId}/accounts/NORMAL.
+
+        Uses fs.Increment (atomic server-side op) instead of a read-then-SET so
+        that two concurrent Paybill verifications for the same user cannot race:
+          • Old approach: read balance → add locally → SET new_balance
+            Risk: if two workers both read the same old_balance they both write
+            the same new_balance, effectively losing one credit entirely.
+          • New approach: fs.Increment lets Firestore's server add atomically,
+            so every call contributes its amount regardless of concurrency.
+        """
         try:
+            from google.cloud import firestore as fs  # local import avoids circular
+
             saving_ref = (
                 self.db.collection("SAVINGS")
                 .document(user_id)
@@ -154,24 +165,28 @@ class PaybillVerificationService:
                 .document("NORMAL")
             )
 
+            # Read old balance for logging only — not used in the write
             snap = saving_ref.get()
             old_balance = 0.0
             if snap.exists:
                 data = snap.to_dict() or {}
                 old_balance = float(data.get("amount", 0))
 
-            new_balance = old_balance + amount
+            # Atomic server-side increment — safe against concurrent updates
+            saving_ref.set(
+                {
+                    "id": "NORMAL",
+                    "amount": fs.Increment(float(amount)),
+                    "accountType": "NORMAL",
+                    "userId": user_id,
+                    "lastUpdated": int(time.time() * 1000),
+                },
+                merge=True,
+            )
 
-            saving_ref.set({
-                "id": "NORMAL",
-                "amount": new_balance,
-                "accountType": "NORMAL",
-                "userId": user_id,
-                "lastUpdated": int(time.time() * 1000),
-            })
-
+            new_balance = old_balance + float(amount)  # approximate for display
             logger.info(
-                "Updated balance with PAYBILL payment: %s (Old: %s, New: %s)",
+                "Updated balance with PAYBILL payment: %s (Old: %s, New: ~%s)",
                 amount, old_balance, new_balance,
             )
 

@@ -22,7 +22,15 @@ class PaymentVerificationService:
       - SAVINGS/{userId}/accounts/{accountType}
     """
 
-    # Simple in-memory cache of processed transaction references
+    # Simple in-memory cache of processed transaction references.
+    # WARNING: This cache is per-process. In a multi-worker deployment (e.g.
+    # gunicorn --workers N) each worker maintains its own copy, so this list
+    # provides NO cross-worker deduplication protection.
+    # The primary double-credit guard is the atomic Firestore transaction inside
+    # _update_transaction_in_firestore(). This cache is only a cheap fast-path
+    # optimisation for the *same* worker within a single running session.
+    # For a persistent, cross-worker solution replace this list with a Firestore
+    # document or a Redis SET keyed on merchant_request_id.
     _processed_transactions: List[str] = []
 
     def __init__(self) -> None:
@@ -73,35 +81,69 @@ class PaymentVerificationService:
         """
         Locate a PENDING/PROCESSING transaction whose accountReference matches the
         given merchant_request_id, and mark it as DONE plus attach transactionCode.
+
+        Uses a Firestore transaction to atomically read-then-write so that two
+        concurrent callers (e.g. two gunicorn workers or /stk-query + cron) cannot
+        both observe PENDING and both return True, which would cause a double
+        balance credit downstream.
         """
         try:
             user_ref = self.db.collection("TRANSACTIONS").document(user_id)
+
+            # Collect candidate doc refs first (outside the transaction), then
+            # confirm+update inside an atomic Firestore transaction.
+            target_ref: Optional[Any] = None
             for month_collection in user_ref.collections():
                 for doc in month_collection.stream():
                     data = doc.to_dict() or {}
-                    account_ref = data.get("accountReference", "")
-                    status = data.get("status", "")
-
                     if (
-                        account_ref == merchant_request_id
-                        and status in {"PENDING", "PROCESSING"}
+                        data.get("accountReference", "") == merchant_request_id
+                        and data.get("status", "") in {"PENDING", "PROCESSING"}
                     ):
-                        doc.reference.update(
-                            {
-                                "status": "DONE",
-                                "transactionCode": transaction_code,
-                                "paymentMethod": "Direct Mobile - Verified",
-                            }
-                        )
-                        logger.info("Updated transaction %s to DONE", doc.id)
-                        return True
+                        target_ref = doc.reference
+                        break
+                if target_ref:
+                    break
 
-            logger.warning(
-                "No matching transaction found for merchantRequestId=%s userId=%s",
-                merchant_request_id,
-                user_id,
-            )
-            return False
+            if target_ref is None:
+                logger.warning(
+                    "No matching PENDING/PROCESSING transaction found for "
+                    "merchantRequestId=%s userId=%s",
+                    merchant_request_id,
+                    user_id,
+                )
+                return False
+
+            # Atomic read-check-write: only one concurrent caller can win.
+            @fs.transactional
+            def _do_update(transaction: Any, ref: Any) -> bool:
+                snap = ref.get(transaction=transaction)
+                if not snap.exists:
+                    return False
+                current_status = (snap.to_dict() or {}).get("status", "")
+                if current_status not in {"PENDING", "PROCESSING"}:
+                    # Another worker already handled this transaction.
+                    logger.info(
+                        "Transaction %s already in status=%s — skipping (concurrent update)",
+                        snap.id,
+                        current_status,
+                    )
+                    return False
+                transaction.update(
+                    ref,
+                    {
+                        "status": "DONE",
+                        "transactionCode": transaction_code,
+                        "paymentMethod": "Direct Mobile - Verified",
+                    },
+                )
+                logger.info("Atomically updated transaction %s to DONE", snap.id)
+                return True
+
+            txn = self.db.transaction()
+            result = _do_update(txn, target_ref)
+            return result
+
         except Exception as exc:  # noqa: BLE001
             logger.exception("Firestore transaction update error: %s", exc)
             return False
@@ -304,13 +346,20 @@ class PaymentVerificationService:
                             transaction_code = payment.get("TRANSACTION CODE", "")
                             amount = float(payment.get("AMOUNT", 0.0))
 
-                            doc.reference.update(
-                                {
-                                    "status": "DONE",
-                                    "transactionCode": transaction_code,
-                                    "paymentMethod": "Direct Mobile - Verified",
-                                }
+                            # Use the atomic helper so concurrent callers (workers /
+                            # endpoints) cannot both win and double-credit the balance.
+                            updated = self._update_transaction_in_firestore(
+                                user_id, account_reference, transaction_code
                             )
+                            if not updated:
+                                # Another path already confirmed this transaction.
+                                logger.info(
+                                    "process_pending_transactions: tx %s already "
+                                    "confirmed — skipping balance credit",
+                                    transaction_id,
+                                )
+                                self._processed_transactions.append(account_reference)
+                                break
 
                             balance_result = self._update_user_balance(
                                 user_id, account_type, amount
