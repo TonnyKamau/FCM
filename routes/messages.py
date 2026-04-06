@@ -1,3 +1,5 @@
+import logging
+
 from flask import Blueprint, request, jsonify
 from google.cloud import firestore as fs
 
@@ -107,23 +109,35 @@ def list_messages(group_id):
         query = base_query.order_by("timestamp", direction=fs.Query.DESCENDING).limit(limit)
         reverse_after_fetch = True
 
-    docs = list(query.get())
-    if reverse_after_fetch:
-        docs.reverse()
+    msg_map = {}
+    try:
+        docs = list(query.get())
+        if reverse_after_fetch:
+            docs.reverse()
 
-    msg_map = {d.id: message_to_dict(d.id, d.to_dict()) for d in docs}
+        for doc in docs:
+            data = doc.to_dict() or {}
+            try:
+                msg_map[doc.id] = message_to_dict(doc.id, data)
+            except Exception as exc:
+                logging.exception("Skipping malformed message doc %s in %s: %s", doc.id, group_id, exc)
+    except Exception as exc:
+        logging.exception("Flat message query failed for %s: %s", group_id, exc)
 
     if include_legacy:
-        for legacy_msg in _load_legacy_messages(
-            db,
-            group_id,
-            since=since,
-            before=before,
-            limit=limit,
-        ):
-            msg_map.setdefault(legacy_msg["id"], legacy_msg)
+        try:
+            for legacy_msg in _load_legacy_messages(
+                db,
+                group_id,
+                since=since,
+                before=before,
+                limit=limit,
+            ):
+                msg_map.setdefault(legacy_msg["id"], legacy_msg)
+        except Exception as exc:
+            logging.exception("Legacy message load failed for %s: %s", group_id, exc)
 
-    messages = sorted(msg_map.values(), key=lambda m: m["timestamp"])
+    messages = sorted(msg_map.values(), key=lambda m: int(m.get("timestamp", 0) or 0))
     if not since and len(messages) > limit:
         messages = messages[-limit:]
 

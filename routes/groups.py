@@ -55,20 +55,32 @@ def list_groups():
     seen_ids = set()
 
     member_docs = db.collection(C.GROUP_MEMBERS).where("user_id", "==", uid).get()
-    group_ids = set(
-        m.to_dict().get("group_id") for m in member_docs
-        if m.to_dict().get("group_id")
-    )
+    member_by_group = {}
+    group_ids = set()
+    for member_doc in member_docs:
+        member_data = member_doc.to_dict() or {}
+        group_id = member_data.get("group_id")
+        if not group_id:
+            continue
+        group_ids.add(group_id)
+        member_by_group[group_id] = group_member_to_dict(member_data)
 
     owned_docs = db.collection(C.GROUP_ACCOUNTS).where("admin_id", "==", uid).get()
-    for d in owned_docs:
-        group_ids.add(d.id)
+    for doc in owned_docs:
+        result.append(group_to_dict(doc.id, doc.to_dict() or {}, members=[]))
+        seen_ids.add(doc.id)
+        group_ids.add(doc.id)
 
     for gid in group_ids:
-        g_dict = _build_group(db, gid)
-        if g_dict:
-            result.append(g_dict)
-            seen_ids.add(gid)
+        if gid in seen_ids:
+            continue
+        group_doc = db.collection(C.GROUP_ACCOUNTS).document(gid).get()
+        if not group_doc.exists:
+            continue
+        member = member_by_group.get(gid)
+        members = [member] if member else []
+        result.append(group_to_dict(group_doc.id, group_doc.to_dict() or {}, members))
+        seen_ids.add(gid)
 
     try:
         chats_doc = db.collection(C.CHATS).document(uid).get()

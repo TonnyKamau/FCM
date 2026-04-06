@@ -122,6 +122,11 @@ def group_member_to_dict(d, user_doc=None):
 # ── Messages ──────────────────────────────────────────────────────────────────
 
 def message_to_dict(doc_id, d):
+    try:
+        timestamp = int(d.get("timestamp", _now_ms()) or _now_ms())
+    except (TypeError, ValueError):
+        timestamp = _now_ms()
+
     return {
         "id":           doc_id,
         "chatID":        d.get("group_id", "")         or d.get("chatID",        ""),
@@ -138,7 +143,7 @@ def message_to_dict(doc_id, d):
         "money":         d.get("money",   ""),
         "image":         d.get("image",   ""),
         "caption":       d.get("caption", ""),
-        "timestamp":     d.get("timestamp", _now_ms()),
+        "timestamp":     timestamp,
     }
 
 
