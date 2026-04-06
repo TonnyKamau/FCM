@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from firebase_utils import get_db
-from models import group_to_dict, group_member_to_dict, group_member_from_chats
+from models import group_to_dict, group_member_to_dict
 from auth_utils import require_auth, get_jwt_identity
 import db_constants as C
 import uuid
@@ -13,6 +13,20 @@ def _now_ms():
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _member_summary(user_id, role, user_data=None, fallback_email=""):
+    data = user_data or {}
+    image = data.get("image_url", "") or data.get("image", "")
+    return {
+        "user_id": user_id,
+        "role": role,
+        "member_name": data.get("name", "") or "",
+        "member_email": data.get("email", "") or fallback_email,
+        "member_phone": data.get("phone", "") or data.get("phoneNum", "") or "",
+        "member_image": image,
+        "member_photo_url": image,
+    }
+
+
 def _build_group(db, group_id):
     """Fetch a group document and its members; returns group dict or None."""
     doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
@@ -21,12 +35,7 @@ def _build_group(db, group_id):
     gd = doc.to_dict()
 
     member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
-    members = []
-    for md in member_docs:
-        m = md.to_dict()
-        user_doc = db.collection(C.USERS).document(m.get("user_id", "")).get()
-        u = user_doc.to_dict() if user_doc.exists else {}
-        members.append(group_member_to_dict(m, u))
+    members = [group_member_to_dict(md.to_dict()) for md in member_docs]
 
     return group_to_dict(doc.id, gd, members)
 
@@ -35,19 +44,17 @@ def _build_group(db, group_id):
 @require_auth
 def list_groups():
     uid = get_jwt_identity()
-    db  = get_db()
+    db = get_db()
 
-    result     = []
-    seen_ids   = set()
+    result = []
+    seen_ids = set()
 
-    # ── Source 1: new backend — GroupMembers collection ───────────────────────
     member_docs = db.collection(C.GROUP_MEMBERS).where("user_id", "==", uid).get()
     group_ids = set(
         m.to_dict().get("group_id") for m in member_docs
         if m.to_dict().get("group_id")
     )
 
-    # ── Source 2: new backend — GroupAccounts the user owns ───────────────────
     owned_docs = db.collection(C.GROUP_ACCOUNTS).where("admin_id", "==", uid).get()
     for d in owned_docs:
         group_ids.add(d.id)
@@ -58,7 +65,6 @@ def list_groups():
             result.append(g_dict)
             seen_ids.add(gid)
 
-    # ── Source 3: original project — CHATS/{uid} map document ─────────────────
     try:
         chats_doc = db.collection(C.CHATS).document(uid).get()
         if chats_doc.exists:
@@ -109,14 +115,15 @@ def create_group():
     }
     db.collection(C.GROUP_ACCOUNTS).document(group_id).set(group_data)
 
-    # Add creator as OWNER member
-    db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set({
-        "group_id": group_id,
-        "user_id": uid,
-        "role": "OWNER",
-    })
+    creator_doc = db.collection(C.USERS).document(uid).get()
+    creator_data = creator_doc.to_dict() if creator_doc.exists else {}
 
-    # Add extra members provided in request
+    owner_member = {
+        "group_id": group_id,
+        **_member_summary(uid, "OWNER", creator_data),
+    }
+    db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(owner_member)
+
     for m in data.get("members", []):
         email = m.get("email", "").strip().lower()
         if email:
@@ -124,11 +131,17 @@ def create_group():
                 db.collection(C.USERS).where("email", "==", email).limit(1).get()
             )
             if user_docs and user_docs[0].id != uid:
-                db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set({
+                user_data = user_docs[0].to_dict() or {}
+                member_payload = {
                     "group_id": group_id,
-                    "user_id": user_docs[0].id,
-                    "role": m.get("role", "member"),
-                })
+                    **_member_summary(
+                        user_docs[0].id,
+                        m.get("role", "member"),
+                        user_data,
+                        fallback_email=email,
+                    ),
+                }
+                db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(member_payload)
 
     return jsonify({"group": _build_group(db, group_id)}), 201
 

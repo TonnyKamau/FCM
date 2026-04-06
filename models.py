@@ -93,14 +93,28 @@ def group_to_dict(doc_id, d, members=None):
 
 def group_member_to_dict(d, user_doc=None):
     u = user_doc or {}
-    image = u.get("image_url", "") or u.get("image", "")
+    image = (
+        d.get("member_image", "")
+        or d.get("image", "")
+        or d.get("member_photo_url", "")
+        or d.get("photoUrl", "")
+        or u.get("image_url", "")
+        or u.get("image", "")
+    )
+    photo_url = d.get("member_photo_url", "") or d.get("photoUrl", "") or image
     return {
-        "id":       d.get("user_id", ""),
-        "name":     u.get("name", ""),
-        "email":    u.get("email", ""),
-        "phoneNum": u.get("phone", "") or u.get("phoneNum", ""),
+        "id":       d.get("user_id", "") or d.get("id", "") or d.get("uid", ""),
+        "name":     d.get("member_name", "") or d.get("name", "") or u.get("name", ""),
+        "email":    d.get("member_email", "") or d.get("email", "") or u.get("email", ""),
+        "phoneNum": (
+            d.get("member_phone", "")
+            or d.get("phoneNum", "")
+            or d.get("phone", "")
+            or u.get("phone", "")
+            or u.get("phoneNum", "")
+        ),
         "image":    image,
-        "photoUrl": image,
+        "photoUrl": photo_url,
         "role":     d.get("role", "UNKNOWN_ROLE"),
     }
 
@@ -302,3 +316,5 @@ def license_to_dict(doc_id, d):
         "recipientEmail": d.get("recipient_email", "")  or d.get("recipientEmail", ""),
         "usedAt":         d.get("used_at",       "")   or d.get("usedAt",       ""),
     }
+
+
