@@ -90,7 +90,8 @@ def list_messages(group_id):
     since = request.args.get("since", 0, type=int) or 0
     before = request.args.get("before", 0, type=int) or 0
     limit = _clamp_limit(request.args.get("limit", _DEFAULT_LIMIT, type=int))
-    include_legacy = _is_true(request.args.get("includeLegacy")) and not since
+    canonical_only = _is_true(request.args.get("canonical"))
+    include_legacy = _is_true(request.args.get("includeLegacy")) and not since and not canonical_only
 
     base_query = db.collection(C.MESSAGES).where("group_id", "==", group_id)
     reverse_after_fetch = False
@@ -124,7 +125,7 @@ def list_messages(group_id):
     except Exception as exc:
         logging.exception("Flat message query failed for %s: %s", group_id, exc)
 
-    if include_legacy:
+    if include_legacy and not msg_map:
         try:
             for legacy_msg in _load_legacy_messages(
                 db,

@@ -14,6 +14,16 @@ def _now_ms():
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _is_true(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _has_usable_display(group_dict):
+    return bool(str(group_dict.get("id", "")).strip()) and bool(
+        str(group_dict.get("name", "")).strip()
+    )
+
+
 def _member_summary(user_id, role, user_data=None, fallback_email=""):
     data = user_data or {}
     image = data.get("image_url", "") or data.get("image", "")
@@ -46,8 +56,10 @@ def _build_group(db, group_id):
 def list_groups():
     uid = get_jwt_identity()
     db = get_db()
+    canonical_only = _is_true(request.args.get("canonical"))
 
-    cached_payload = get_cached_user_payload("groups", uid)
+    cache_name = "groups_canonical" if canonical_only else "groups"
+    cached_payload = get_cached_user_payload(cache_name, uid)
     if cached_payload is not None:
         return jsonify(cached_payload)
 
@@ -82,27 +94,29 @@ def list_groups():
         result.append(group_to_dict(group_doc.id, group_doc.to_dict() or {}, members))
         seen_ids.add(gid)
 
-    try:
-        chats_doc = db.collection(C.CHATS).document(uid).get()
-        if chats_doc.exists:
-            chat_data = chats_doc.to_dict() or {}
-            for group_id, group_data in chat_data.items():
-                if not isinstance(group_data, dict):
-                    continue
-                if not group_data.get("isBusinessGroup", False):
-                    continue
-                if group_id in seen_ids:
-                    continue
+    if not canonical_only:
+        try:
+            chats_doc = db.collection(C.CHATS).document(uid).get()
+            if chats_doc.exists:
+                chat_data = chats_doc.to_dict() or {}
+                for group_id, group_data in chat_data.items():
+                    if not isinstance(group_data, dict):
+                        continue
+                    if not group_data.get("isBusinessGroup", False):
+                        continue
+                    if group_id in seen_ids:
+                        continue
 
-                actual_id = group_data.get("id", group_id)
-                result.append(group_to_dict(actual_id, group_data))
-                seen_ids.add(actual_id)
-    except Exception:
-        pass
+                    actual_id = group_data.get("id", group_id)
+                    result.append(group_to_dict(actual_id, group_data))
+                    seen_ids.add(actual_id)
+        except Exception:
+            pass
 
+    result = [group for group in result if _has_usable_display(group)]
     result.sort(key=lambda g: g.get("timestamp", 0), reverse=True)
     payload = {"groups": result}
-    set_cached_user_payload("groups", uid, payload)
+    set_cached_user_payload(cache_name, uid, payload)
     return jsonify(payload)
 
 
@@ -143,6 +157,7 @@ def create_group():
     }
     db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(owner_member)
     invalidate_user_payload("groups", uid)
+    invalidate_user_payload("groups_canonical", uid)
 
     for m in data.get("members", []):
         email = m.get("email", "").strip().lower()
@@ -163,6 +178,7 @@ def create_group():
                 }
                 db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(member_payload)
                 invalidate_user_payload("groups", user_docs[0].id)
+                invalidate_user_payload("groups_canonical", user_docs[0].id)
 
     return jsonify({"group": _build_group(db, group_id)}), 201
 
@@ -207,5 +223,7 @@ def assign_role(group_id, member_id):
 
     gm_docs[0].reference.update({"role": new_role})
     invalidate_user_payload("groups", uid)
+    invalidate_user_payload("groups_canonical", uid)
     invalidate_user_payload("groups", member_id)
+    invalidate_user_payload("groups_canonical", member_id)
     return jsonify({"group": _build_group(db, group_id)})

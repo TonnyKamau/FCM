@@ -37,6 +37,10 @@ def _now_ms():
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _is_true(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _to_dict(doc_id, d):
     """Serialise a raw Firestore dict to the JSON shape expected by Flutter."""
     is_expense = d.get("is_expense", True) if "is_expense" in d else d.get("isExpense", True)
@@ -92,11 +96,14 @@ def _check_member(db, group_id, uid):
 def _list(group_id, is_expense_flag):
     uid = get_jwt_identity()
     db  = get_db()
+    canonical_only = _is_true(request.args.get("canonical"))
     is_mem, admin_id = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     cache_name = "expenses" if is_expense_flag else "income"
+    if canonical_only:
+        cache_name = f"{cache_name}_canonical"
     cached_payload = get_cached_group_payload(cache_name, group_id)
     if cached_payload is not None:
         return jsonify(cached_payload)
@@ -111,7 +118,7 @@ def _list(group_id, is_expense_flag):
     entry_map = {d.id: _to_dict(d.id, d.to_dict()) for d in docs}
 
     # Source 2: original kitifms — EXPENSES/{adminId} single map document
-    if admin_id:
+    if admin_id and not canonical_only:
         try:
             orig_doc = db.collection(_EXPENSES).document(admin_id).get()
             if orig_doc.exists:
@@ -163,7 +170,9 @@ def _create(group_id, is_expense_flag):
         "created_at":     datetime.now(timezone.utc).isoformat(),
     }
     db.collection(_EXPENSES).document(entry_id).set(entry_data)
-    invalidate_group_payload("expenses" if is_expense_flag else "income", group_id)
+    base_cache_name = "expenses" if is_expense_flag else "income"
+    invalidate_group_payload(base_cache_name, group_id)
+    invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
     key = "expense" if is_expense_flag else "income"
     return jsonify({key: _to_dict(entry_id, entry_data)}), 201
 
@@ -193,7 +202,9 @@ def _update(group_id, entry_id, is_expense_flag):
     if "payment_method" in data: updates["payment_method"] = data["payment_method"]
     doc.reference.update(updates)
 
-    invalidate_group_payload("expenses" if is_expense_flag else "income", group_id)
+    base_cache_name = "expenses" if is_expense_flag else "income"
+    invalidate_group_payload(base_cache_name, group_id)
+    invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
     updated = db.collection(_EXPENSES).document(entry_id).get()
     key = "expense" if is_expense_flag else "income"
     return jsonify({key: _to_dict(updated.id, updated.to_dict())})
@@ -214,7 +225,9 @@ def _delete(group_id, entry_id, is_expense_flag):
         return jsonify({"error": "Entry not found"}), 404
 
     doc.reference.delete()
-    invalidate_group_payload("expenses" if is_expense_flag else "income", group_id)
+    base_cache_name = "expenses" if is_expense_flag else "income"
+    invalidate_group_payload(base_cache_name, group_id)
+    invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
     return jsonify({"message": "Deleted"})
 
 

@@ -8,9 +8,14 @@ from datetime import datetime, timezone
 from cache_utils import (
     cached_is_member, invalidate_products,
     get_cached_products, set_cached_products,
+    get_cached_group_payload, set_cached_group_payload, invalidate_group_payload,
 )
 
 products_bp = Blueprint("products", __name__, url_prefix="/groups/<group_id>/products")
+
+
+def _is_true(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_member(db, group_id, uid):
@@ -44,82 +49,84 @@ def _is_member(db, group_id, uid):
 def list_products(group_id):
     uid = get_jwt_identity()
     db = get_db()
+    canonical_only = _is_true(request.args.get("canonical"))
     is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     # Return cached response if fresh (avoids repeated dual-source reads)
-    cached = get_cached_products(group_id)
-    if cached is not None:
-        return jsonify({"products": cached})
+    if canonical_only:
+        cached_payload = get_cached_group_payload("products_canonical", group_id)
+        if cached_payload is not None:
+            return jsonify(cached_payload)
+    else:
+        cached = get_cached_products(group_id)
+        if cached is not None:
+            return jsonify({"products": cached})
 
     # ── Source 1: new backend — flat PRODUCTS collection with group_id field ──
     docs = db.collection(C.PRODUCTS).where("group_id", "==", group_id).get()
     product_map = {d.id: product_to_dict(d.id, d.to_dict()) for d in docs}
 
     # ── Source 2: original project — PRODUCTS/{groupId} single map document ──
-    try:
-        orig_doc = db.collection(C.PRODUCTS).document(group_id).get()
-        if orig_doc.exists:
-            for prod_id, prod_data in (orig_doc.to_dict() or {}).items():
-                if not isinstance(prod_data, dict):
-                    continue
-                if prod_id not in product_map:
-                    # Product only exists in Android format — add it
-                    product_map[prod_id] = product_to_dict(prod_id, prod_data)
-                else:
-                    # Product exists in both sources.
-                    # Android is the authoritative writer for its own fields
-                    # (stock adjustments, image updates, price edits done in the
-                    # Android app all land in the map doc). Merge every field
-                    # that differs and back-fill the flat doc so future reads are
-                    # already consistent without needing this merge step.
-                    android_parsed = product_to_dict(prod_id, prod_data)
-                    flat = product_map[prod_id]
+    if not canonical_only:
+        try:
+            orig_doc = db.collection(C.PRODUCTS).document(group_id).get()
+            if orig_doc.exists:
+                for prod_id, prod_data in (orig_doc.to_dict() or {}).items():
+                    if not isinstance(prod_data, dict):
+                        continue
+                    if prod_id not in product_map:
+                        product_map[prod_id] = product_to_dict(prod_id, prod_data)
+                    else:
+                        android_parsed = product_to_dict(prod_id, prod_data)
+                        flat = product_map[prod_id]
 
-                    # Fields that Android manages and may update independently
-                    merge_fields = [
-                        ("available_stock", "available_stock"),
-                        ("image",           "image"),
-                        ("unit_price",      "unit_price"),
-                        ("buying_price",    "buying_price"),
-                        ("wholesale_price", "wholesale_price"),
-                        ("special_price",   "special_price"),
-                        ("reorder_level",   "reorder_level"),
-                        ("name",            "name"),
-                        ("desc",            "desc"),
-                    ]
-                    backfill = {}
-                    for resp_key, _ in merge_fields:
-                        android_val = android_parsed.get(resp_key)
-                        flat_val    = flat.get(resp_key)
-                        if android_val is not None and android_val != flat_val:
-                            flat[resp_key] = android_val
-                            # Map response key → Firestore field name
-                            fs_key = {
-                                "available_stock": "available_stock",
-                                "image":           "image",
-                                "unit_price":      "unit_price",
-                                "buying_price":    "buying_price",
-                                "wholesale_price": "wholesale_price",
-                                "special_price":   "special_price",
-                                "reorder_level":   "reorder_level",
-                                "name":            "name",
-                                "desc":            "description",
-                            }.get(resp_key, resp_key)
-                            backfill[fs_key] = android_val
+                        merge_fields = [
+                            ("available_stock", "available_stock"),
+                            ("image",           "image"),
+                            ("unit_price",      "unit_price"),
+                            ("buying_price",    "buying_price"),
+                            ("wholesale_price", "wholesale_price"),
+                            ("special_price",   "special_price"),
+                            ("reorder_level",   "reorder_level"),
+                            ("name",            "name"),
+                            ("desc",            "desc"),
+                        ]
+                        backfill = {}
+                        for resp_key, _ in merge_fields:
+                            android_val = android_parsed.get(resp_key)
+                            flat_val    = flat.get(resp_key)
+                            if android_val is not None and android_val != flat_val:
+                                flat[resp_key] = android_val
+                                fs_key = {
+                                    "available_stock": "available_stock",
+                                    "image":           "image",
+                                    "unit_price":      "unit_price",
+                                    "buying_price":    "buying_price",
+                                    "wholesale_price": "wholesale_price",
+                                    "special_price":   "special_price",
+                                    "reorder_level":   "reorder_level",
+                                    "name":            "name",
+                                    "desc":            "description",
+                                }.get(resp_key, resp_key)
+                                backfill[fs_key] = android_val
 
-                    if backfill:
-                        try:
-                            db.collection(C.PRODUCTS).document(prod_id).update(backfill)
-                        except Exception:
-                            pass
-    except Exception:
-        pass
+                        if backfill:
+                            try:
+                                db.collection(C.PRODUCTS).document(prod_id).update(backfill)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
 
     products = sorted(product_map.values(), key=lambda p: p["name"])
-    set_cached_products(group_id, products)
-    return jsonify({"products": products})
+    payload = {"products": products}
+    if canonical_only:
+        set_cached_group_payload("products_canonical", group_id, payload)
+    else:
+        set_cached_products(group_id, products)
+    return jsonify(payload)
 
 
 @products_bp.route("", methods=["POST"])
@@ -187,6 +194,7 @@ def create_product(group_id):
         pass  # non-fatal: Flutter app still works via flat docs
 
     invalidate_products(group_id)
+    invalidate_group_payload("products_canonical", group_id)
     return jsonify({"product": product_to_dict(product_id, product_data)}), 201
 
 
@@ -239,6 +247,7 @@ def update_product(group_id, product_id):
         pass
 
     invalidate_products(group_id)
+    invalidate_group_payload("products_canonical", group_id)
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})
 
 
@@ -262,6 +271,7 @@ def delete_product(group_id, product_id):
         pass
 
     invalidate_products(group_id)
+    invalidate_group_payload("products_canonical", group_id)
     return jsonify({"message": "Product deleted"})
 
 
@@ -291,5 +301,6 @@ def adjust_stock(group_id, product_id):
         pass
 
     invalidate_products(group_id)
+    invalidate_group_payload("products_canonical", group_id)
     updated = db.collection(C.PRODUCTS).document(product_id).get()
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})

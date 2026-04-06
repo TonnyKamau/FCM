@@ -16,6 +16,10 @@ from cache_utils import (
 sales_bp = Blueprint("sales", __name__, url_prefix="/groups/<group_id>/sales")
 
 
+def _is_true(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _increment_group_account_balance(db, group_id, amount):
     """Atomically add `amount` to the savings GroupAccount balance.
 
@@ -143,11 +147,13 @@ def _build_stock_card(db, group_id, items, now):
 def list_sales(group_id):
     uid = get_jwt_identity()
     db = get_db()
+    canonical_only = _is_true(request.args.get("canonical"))
     is_mem, _ = cached_is_member(group_id, uid, lambda: _check_member(db, group_id, uid))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
-    cached_payload = get_cached_group_payload("sales", group_id)
+    cache_name = "sales_canonical" if canonical_only else "sales"
+    cached_payload = get_cached_group_payload(cache_name, group_id)
     if cached_payload is not None:
         return jsonify(cached_payload)
 
@@ -159,22 +165,23 @@ def list_sales(group_id):
         sale_map[d.id] = sale_to_dict(d.id, d.to_dict())
 
     # ── Source 2: original project — nested subcollection structure ───────────
-    for coll_name, is_credit_flag in [(C.CASH_SALE, False), (C.CREDIT_SALE, True)]:
-        try:
-            grp_ref   = db.collection(coll_name).document(group_id)
-            prod_refs = list(grp_ref.collection("sales").list_documents())
-            for prod_ref in prod_refs:
-                for entry_doc in prod_ref.collection("entries").stream():
-                    if entry_doc.id not in sale_map:
-                        d = entry_doc.to_dict() or {}
-                        d.setdefault("is_credit", is_credit_flag)
-                        sale_map[entry_doc.id] = sale_to_dict(entry_doc.id, d)
-        except Exception as e:
-            logging.exception("list_sales Source 2 error (%s %s): %s", coll_name, group_id, e)
+    if not canonical_only:
+        for coll_name, is_credit_flag in [(C.CASH_SALE, False), (C.CREDIT_SALE, True)]:
+            try:
+                grp_ref   = db.collection(coll_name).document(group_id)
+                prod_refs = list(grp_ref.collection("sales").list_documents())
+                for prod_ref in prod_refs:
+                    for entry_doc in prod_ref.collection("entries").stream():
+                        if entry_doc.id not in sale_map:
+                            d = entry_doc.to_dict() or {}
+                            d.setdefault("is_credit", is_credit_flag)
+                            sale_map[entry_doc.id] = sale_to_dict(entry_doc.id, d)
+            except Exception as e:
+                logging.exception("list_sales Source 2 error (%s %s): %s", coll_name, group_id, e)
 
     sales = sorted(sale_map.values(), key=lambda s: s["date"], reverse=True)
     payload = {"sales": sales}
-    set_cached_group_payload("sales", group_id, payload)
+    set_cached_group_payload(cache_name, group_id, payload)
     return jsonify(payload)
 
 
@@ -340,9 +347,13 @@ def create_sale(group_id):
     batch.commit()
 
     invalidate_group_payload("sales", group_id)
+    invalidate_group_payload("sales_canonical", group_id)
     invalidate_group_payload("customers", group_id)
+    invalidate_group_payload("customers_canonical", group_id)
     invalidate_group_payload("stock_out", group_id)
+    invalidate_group_payload("stock_out_canonical", group_id)
     invalidate_group_payload("income", group_id)
+    invalidate_group_payload("income_canonical", group_id)
     invalidate_report("sales", group_id)
     invalidate_report("stock", group_id)
 
@@ -512,6 +523,7 @@ def mark_paid(group_id, sale_id):
             if entry_doc.exists:
                 entry_ref.update({"paymentStatus": True})
                 invalidate_group_payload("sales", group_id)
+                invalidate_group_payload("sales_canonical", group_id)
                 invalidate_report("sales", group_id)
                 d = entry_doc.to_dict() or {}
                 d["paymentStatus"] = True
