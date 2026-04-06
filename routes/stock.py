@@ -5,6 +5,7 @@ from auth_utils import require_auth, get_jwt_identity
 import db_constants as C
 import uuid
 from datetime import datetime, timezone
+from cache_utils import cached_is_member, get_cached_group_payload, set_cached_group_payload, invalidate_group_payload, invalidate_report
 
 stock_bp = Blueprint("stock", __name__, url_prefix="/groups/<group_id>/stock")
 
@@ -40,8 +41,13 @@ def _is_member(db, group_id, uid):
 def list_stock_in(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
+
+    cached_payload = get_cached_group_payload("stock_in", group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
 
     # ── Source 1: new backend — flat STOCK collection with group_id field ──────
     docs = db.collection(C.STOCK).where("group_id", "==", group_id).get()
@@ -77,7 +83,9 @@ def list_stock_in(group_id):
         logging.exception("list_stock_in Source 3 (Android) error (%s): %s", group_id, e)
 
     entries = sorted(entry_map.values(), key=lambda e: e["date"], reverse=True)
-    return jsonify({"stockIn": entries})
+    payload = {"stockIn": entries}
+    set_cached_group_payload("stock_in", group_id, payload)
+    return jsonify(payload)
 
 
 @stock_bp.route("/in", methods=["POST"])
@@ -85,7 +93,8 @@ def list_stock_in(group_id):
 def add_stock_in(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
     data = request.get_json() or {}
@@ -172,6 +181,9 @@ def add_stock_in(group_id):
         except Exception:
             pass
 
+    invalidate_group_payload("stock_in", group_id)
+    invalidate_group_payload("products", group_id)
+    invalidate_report("stock", group_id)
     return jsonify({"stockIn": stock_in_to_dict(entry_id, entry_data)}), 201
 
 
@@ -180,8 +192,13 @@ def add_stock_in(group_id):
 def list_stock_out(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    if not _is_member(db, group_id, uid):
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
         return jsonify({"error": "Access denied"}), 403
+
+    cached_payload = get_cached_group_payload("stock_out", group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
 
     # ── Source 1: new backend — flat STOCK_OUT collection ────────────────────
     docs = db.collection(C.STOCK_OUT).where("group_id", "==", group_id).get()
@@ -230,4 +247,6 @@ def list_stock_out(group_id):
         logging.exception("list_stock_out Source 3 (Android) error (%s): %s", group_id, e)
 
     entries = sorted(entry_map.values(), key=lambda e: e["date"], reverse=True)
-    return jsonify({"stockOut": entries})
+    payload = {"stockOut": entries}
+    set_cached_group_payload("stock_out", group_id, payload)
+    return jsonify(payload)

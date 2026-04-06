@@ -5,7 +5,7 @@ from auth_utils import require_auth, get_jwt_identity
 import db_constants as C
 import uuid
 from datetime import datetime, timezone
-from cache_utils import cached_is_member
+from cache_utils import cached_is_member, get_cached_group_payload, set_cached_group_payload, invalidate_group_payload
 
 customers_bp = Blueprint("customers", __name__, url_prefix="/groups/<group_id>/customers")
 
@@ -45,6 +45,10 @@ def list_customers(group_id):
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
+    cached_payload = get_cached_group_payload("customers", group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
     # ── Source 1: new backend — flat Customers collection with group_id field ─
     docs = db.collection(C.CUSTOMERS).where("group_id", "==", group_id).get()
     cust_map = {d.id: customer_to_dict(d.id, d.to_dict()) for d in docs}
@@ -64,7 +68,9 @@ def list_customers(group_id):
         pass
 
     customers = sorted(cust_map.values(), key=lambda c: c["name"])
-    return jsonify({"customers": customers})
+    payload = {"customers": customers}
+    set_cached_group_payload("customers", group_id, payload)
+    return jsonify(payload)
 
 
 @customers_bp.route("", methods=["POST"])
@@ -120,6 +126,7 @@ def create_customer(group_id):
     except Exception:
         pass
 
+    invalidate_group_payload("customers", group_id)
     return jsonify({"customer": customer_to_dict(cust_id, cust_data)}), 201
 
 
@@ -172,6 +179,7 @@ def update_customer(group_id, customer_id):
         updates["is_active"] = bool(data["is_active"])
 
     doc.reference.update(updates)
+    invalidate_group_payload("customers", group_id)
     updated = doc.reference.get()
     return jsonify({"customer": customer_to_dict(updated.id, updated.to_dict())})
 
@@ -188,6 +196,7 @@ def delete_customer(group_id, customer_id):
     if not doc.exists or doc.to_dict().get("group_id") != group_id:
         return jsonify({"error": "Customer not found"}), 404
     doc.reference.delete()
+    invalidate_group_payload("customers", group_id)
     return jsonify({"message": "Customer deleted"})
 
 
@@ -285,6 +294,7 @@ def record_payment(group_id, customer_id):
         "totalPaid": new_total_paid,
     })
 
+    invalidate_group_payload("customers", group_id)
     updated_cust = cust_doc.reference.get()
     return jsonify({
         "payment": customer_payment_to_dict(payment_id, payment_data),

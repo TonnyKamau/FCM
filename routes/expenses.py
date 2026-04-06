@@ -18,7 +18,7 @@ from firebase_utils import get_db
 from auth_utils import require_auth, get_jwt_identity
 import uuid
 from datetime import datetime, timezone
-from cache_utils import cached_is_member
+from cache_utils import cached_is_member, get_cached_group_payload, set_cached_group_payload, invalidate_group_payload
 
 # ── Firestore collection names ────────────────────────────────────────────────
 _EXPENSES       = "EXPENSES"
@@ -96,6 +96,11 @@ def _list(group_id, is_expense_flag):
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
+    cache_name = "expenses" if is_expense_flag else "income"
+    cached_payload = get_cached_group_payload(cache_name, group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
     # Source 1: flat EXPENSES collection
     docs = (
         db.collection(_EXPENSES)
@@ -124,7 +129,9 @@ def _list(group_id, is_expense_flag):
 
     rows = sorted(entry_map.values(), key=lambda r: r["timestamp"], reverse=True)
     key  = "expenses" if is_expense_flag else "incomes"
-    return jsonify({key: rows})
+    payload = {key: rows}
+    set_cached_group_payload(cache_name, group_id, payload)
+    return jsonify(payload)
 
 
 def _create(group_id, is_expense_flag):
@@ -156,6 +163,7 @@ def _create(group_id, is_expense_flag):
         "created_at":     datetime.now(timezone.utc).isoformat(),
     }
     db.collection(_EXPENSES).document(entry_id).set(entry_data)
+    invalidate_group_payload("expenses" if is_expense_flag else "income", group_id)
     key = "expense" if is_expense_flag else "income"
     return jsonify({key: _to_dict(entry_id, entry_data)}), 201
 
@@ -185,6 +193,7 @@ def _update(group_id, entry_id, is_expense_flag):
     if "payment_method" in data: updates["payment_method"] = data["payment_method"]
     doc.reference.update(updates)
 
+    invalidate_group_payload("expenses" if is_expense_flag else "income", group_id)
     updated = db.collection(_EXPENSES).document(entry_id).get()
     key = "expense" if is_expense_flag else "income"
     return jsonify({key: _to_dict(updated.id, updated.to_dict())})
@@ -205,6 +214,7 @@ def _delete(group_id, entry_id, is_expense_flag):
         return jsonify({"error": "Entry not found"}), 404
 
     doc.reference.delete()
+    invalidate_group_payload("expenses" if is_expense_flag else "income", group_id)
     return jsonify({"message": "Deleted"})
 
 

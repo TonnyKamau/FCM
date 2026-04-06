@@ -7,7 +7,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from google.cloud.firestore import Increment
-from cache_utils import cached_is_member
+from cache_utils import (
+    cached_is_member,
+    get_cached_group_payload, set_cached_group_payload, invalidate_group_payload,
+    invalidate_report,
+)
 
 sales_bp = Blueprint("sales", __name__, url_prefix="/groups/<group_id>/sales")
 
@@ -143,6 +147,10 @@ def list_sales(group_id):
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
+    cached_payload = get_cached_group_payload("sales", group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
     # ── Source 1: new backend — flat CASH_SALE / CREDIT_SALE collections ──────
     cash_docs   = db.collection(C.CASH_SALE  ).where("group_id", "==", group_id).get()
     credit_docs = db.collection(C.CREDIT_SALE).where("group_id", "==", group_id).get()
@@ -165,7 +173,9 @@ def list_sales(group_id):
             logging.exception("list_sales Source 2 error (%s %s): %s", coll_name, group_id, e)
 
     sales = sorted(sale_map.values(), key=lambda s: s["date"], reverse=True)
-    return jsonify({"sales": sales})
+    payload = {"sales": sales}
+    set_cached_group_payload("sales", group_id, payload)
+    return jsonify(payload)
 
 
 @sales_bp.route("", methods=["POST"])
@@ -329,6 +339,13 @@ def create_sale(group_id):
 
     batch.commit()
 
+    invalidate_group_payload("sales", group_id)
+    invalidate_group_payload("customers", group_id)
+    invalidate_group_payload("stock_out", group_id)
+    invalidate_group_payload("income", group_id)
+    invalidate_report("sales", group_id)
+    invalidate_report("stock", group_id)
+
     # ── Increment savings group account balance for M-Pesa sales only ─────────
     if not is_credit and payment_method == "mpesa":
         _increment_group_account_balance(db, group_id, total)
@@ -480,6 +497,8 @@ def mark_paid(group_id, sale_id):
         doc = db.collection(C.CASH_SALE).document(sale_id).get()
     if doc.exists and doc.to_dict().get("group_id") == group_id:
         doc.reference.update({"payment_status": True, "paymentStatus": True})
+        invalidate_group_payload("sales", group_id)
+        invalidate_report("sales", group_id)
         updated = doc.reference.get()
         return jsonify({"sale": sale_to_dict(updated.id, updated.to_dict())})
 
@@ -492,6 +511,8 @@ def mark_paid(group_id, sale_id):
             entry_doc = entry_ref.get()
             if entry_doc.exists:
                 entry_ref.update({"paymentStatus": True})
+                invalidate_group_payload("sales", group_id)
+                invalidate_report("sales", group_id)
                 d = entry_doc.to_dict() or {}
                 d["paymentStatus"] = True
                 d.setdefault("is_credit", True)

@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from firebase_utils import get_db
 from models import group_to_dict, group_member_to_dict
 from auth_utils import require_auth, get_jwt_identity
+from cache_utils import get_cached_user_payload, set_cached_user_payload, invalidate_user_payload
 import db_constants as C
 import uuid
 from datetime import datetime, timezone
@@ -46,6 +47,10 @@ def list_groups():
     uid = get_jwt_identity()
     db = get_db()
 
+    cached_payload = get_cached_user_payload("groups", uid)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
     result = []
     seen_ids = set()
 
@@ -84,7 +89,9 @@ def list_groups():
         pass
 
     result.sort(key=lambda g: g.get("timestamp", 0), reverse=True)
-    return jsonify({"groups": result})
+    payload = {"groups": result}
+    set_cached_user_payload("groups", uid, payload)
+    return jsonify(payload)
 
 
 @groups_bp.route("", methods=["POST"])
@@ -123,6 +130,7 @@ def create_group():
         **_member_summary(uid, "OWNER", creator_data),
     }
     db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(owner_member)
+    invalidate_user_payload("groups", uid)
 
     for m in data.get("members", []):
         email = m.get("email", "").strip().lower()
@@ -142,6 +150,7 @@ def create_group():
                     ),
                 }
                 db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(member_payload)
+                invalidate_user_payload("groups", user_docs[0].id)
 
     return jsonify({"group": _build_group(db, group_id)}), 201
 
@@ -185,4 +194,6 @@ def assign_role(group_id, member_id):
         return jsonify({"error": "Member not found in group"}), 404
 
     gm_docs[0].reference.update({"role": new_role})
+    invalidate_user_payload("groups", uid)
+    invalidate_user_payload("groups", member_id)
     return jsonify({"group": _build_group(db, group_id)})

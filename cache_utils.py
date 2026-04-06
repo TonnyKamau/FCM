@@ -34,7 +34,7 @@ def invalidate_member(group_id: str, uid: str):
 
 # ── Product-list response cache ────────────────────────────────────────────────
 # Key: group_id  →  (products_list, expiry: float)
-_PRODUCT_TTL = 25  # seconds — slightly less than Flutter's 30 s poll interval
+_PRODUCT_TTL = 75  # seconds — slightly less than Flutter's 30 s poll interval
 _product_cache: dict = {}
 
 def get_cached_products(group_id: str):
@@ -57,7 +57,7 @@ def invalidate_products(group_id: str):
 
 # -- Report response cache -----------------------------------------------------
 # Key: (report_type, group_id) -> (payload, expiry: float)
-_REPORT_TTL = 20
+_REPORT_TTL = 75
 _report_cache: dict = {}
 
 def get_cached_report(report_type: str, group_id: str):
@@ -75,3 +75,47 @@ def set_cached_report(report_type: str, group_id: str, payload):
 def invalidate_report(report_type: str, group_id: str):
     with _lock:
         _report_cache.pop((report_type, group_id), None)
+
+
+# -- Generic group response cache ---------------------------------------------
+# Key: (cache_name, group_id) -> (payload, expiry: float)
+_GROUP_PAYLOAD_TTL = 75
+_group_payload_cache: dict = {}
+
+def get_cached_group_payload(cache_name: str, group_id: str):
+    now = time.monotonic()
+    with _lock:
+        entry = _group_payload_cache.get((cache_name, group_id))
+        if entry and now < entry[1]:
+            return entry[0]
+    return None
+
+def set_cached_group_payload(cache_name: str, group_id: str, payload):
+    with _lock:
+        _group_payload_cache[(cache_name, group_id)] = (payload, time.monotonic() + _GROUP_PAYLOAD_TTL)
+
+def invalidate_group_payload(cache_name: str, group_id: str):
+    with _lock:
+        _group_payload_cache.pop((cache_name, group_id), None)
+
+
+# -- Per-user response cache --------------------------------------------------
+# Key: (cache_name, user_id) -> (payload, expiry: float)
+_USER_PAYLOAD_TTL = 75
+_user_payload_cache: dict = {}
+
+def get_cached_user_payload(cache_name: str, user_id: str):
+    now = time.monotonic()
+    with _lock:
+        entry = _user_payload_cache.get((cache_name, user_id))
+        if entry and now < entry[1]:
+            return entry[0]
+    return None
+
+def set_cached_user_payload(cache_name: str, user_id: str, payload):
+    with _lock:
+        _user_payload_cache[(cache_name, user_id)] = (payload, time.monotonic() + _USER_PAYLOAD_TTL)
+
+def invalidate_user_payload(cache_name: str, user_id: str):
+    with _lock:
+        _user_payload_cache.pop((cache_name, user_id), None)
