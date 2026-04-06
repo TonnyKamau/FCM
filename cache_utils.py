@@ -54,3 +54,24 @@ def invalidate_products(group_id: str):
     """Call after any product mutation so next poll gets fresh data."""
     with _lock:
         _product_cache.pop(group_id, None)
+
+# -- Report response cache -----------------------------------------------------
+# Key: (report_type, group_id) -> (payload, expiry: float)
+_REPORT_TTL = 20
+_report_cache: dict = {}
+
+def get_cached_report(report_type: str, group_id: str):
+    now = time.monotonic()
+    with _lock:
+        entry = _report_cache.get((report_type, group_id))
+        if entry and now < entry[1]:
+            return entry[0]
+    return None
+
+def set_cached_report(report_type: str, group_id: str, payload):
+    with _lock:
+        _report_cache[(report_type, group_id)] = (payload, time.monotonic() + _REPORT_TTL)
+
+def invalidate_report(report_type: str, group_id: str):
+    with _lock:
+        _report_cache.pop((report_type, group_id), None)

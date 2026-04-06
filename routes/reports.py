@@ -1,4 +1,4 @@
-"""
+﻿"""
 Report endpoints for the kit-ifms Flutter app.
 
   GET /groups/<group_id>/reports/sales
@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify
 from firebase_utils import get_db
 from models import sale_to_dict, stock_in_to_dict, stock_out_to_dict
 from auth_utils import require_auth, get_jwt_identity
+from cache_utils import get_cached_report, set_cached_report
 from routes.expenses import _list as _expenses_list
 import db_constants as C
 
@@ -18,7 +19,7 @@ reports_bp = Blueprint("reports", __name__, url_prefix="/groups/<group_id>/repor
 
 
 def _is_member(db, group_id, uid):
-    # ── New backend: GroupAccounts + GroupMembers ──────────────────────────────
+    # â”€â”€ New backend: GroupAccounts + GroupMembers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
     if doc.exists:
         if doc.to_dict().get("admin_id") == uid:
@@ -31,7 +32,7 @@ def _is_member(db, group_id, uid):
         )
         if gm:
             return True
-    # ── Original project: CHATS/{uid} map contains the group_id key ───────────
+    # â”€â”€ Original project: CHATS/{uid} map contains the group_id key â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         chats_doc = db.collection(C.CHATS).document(uid).get()
         if chats_doc.exists:
@@ -51,13 +52,17 @@ def sales_report(group_id):
     if not _is_member(db, group_id, uid):
         return jsonify({"error": "Access denied"}), 403
 
-    # ── Source 1: new backend — flat CASH_SALE / CREDIT_SALE collections ──────
+    # â”€â”€ Source 1: new backend â€” flat CASH_SALE / CREDIT_SALE collections â”€â”€â”€â”€â”€â”€
+    cached_payload = get_cached_report('sales', group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
     cash_docs   = db.collection(C.CASH_SALE  ).where("group_id", "==", group_id).get()
     credit_docs = db.collection(C.CREDIT_SALE).where("group_id", "==", group_id).get()
     cash_map   = {d.id: sale_to_dict(d.id, d.to_dict()) for d in cash_docs}
     credit_map = {d.id: sale_to_dict(d.id, d.to_dict()) for d in credit_docs}
 
-    # ── Source 2: original project — nested subcollection structure ───────────
+    # â”€â”€ Source 2: original project â€” nested subcollection structure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # IMPORTANT: use list_documents() NOT stream() for the product-name level.
     for coll_name, sale_map, is_credit_flag in [
         (C.CASH_SALE, cash_map, False), (C.CREDIT_SALE, credit_map, True)
@@ -81,11 +86,13 @@ def sales_report(group_id):
         list(cash_map.values()) + list(credit_map.values()),
         key=lambda s: s["date"], reverse=True
     )
-    return jsonify({
+    payload = {
         "sales":       all_sales,
         "cashSales":   cash_sales,
         "creditSales": credit_sales,
-    })
+    }
+    set_cached_report('sales', group_id, payload)
+    return jsonify(payload)
 
 
 @reports_bp.route("/stock", methods=["GET"])
@@ -96,13 +103,17 @@ def stock_report(group_id):
     if not _is_member(db, group_id, uid):
         return jsonify({"error": "Access denied"}), 403
 
-    # ── Source 1: new backend — flat STOCK / STOCK_OUT collections ────────────
+    # â”€â”€ Source 1: new backend â€” flat STOCK / STOCK_OUT collections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    cached_payload = get_cached_report('stock', group_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
     stock_in_docs  = db.collection(C.STOCK    ).where("group_id", "==", group_id).get()
     stock_out_docs = db.collection(C.STOCK_OUT).where("group_id", "==", group_id).get()
     in_map  = {d.id: stock_in_to_dict (d.id, d.to_dict()) for d in stock_in_docs}
     out_map = {d.id: stock_out_to_dict(d.id, d.to_dict()) for d in stock_out_docs}
 
-    # ── Source 2a: Windows Flutter — STOCK/{groupId} map document ────────────
+    # â”€â”€ Source 2a: Windows Flutter â€” STOCK/{groupId} map document â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         stock_doc = db.collection(C.STOCK).document(group_id).get()
         if stock_doc.exists:
@@ -120,7 +131,7 @@ def stock_report(group_id):
         import logging
         logging.exception("stock_report Source 2a (STOCK map) error (%s): %s", group_id, e)
 
-    # ── Source 2a-extra: Android app — STOCK/{groupId}/{productName}/{stockId} ──
+    # â”€â”€ Source 2a-extra: Android app â€” STOCK/{groupId}/{productName}/{stockId} â”€â”€
     try:
         grp_stock_ref = db.collection(C.STOCK).document(group_id)
         for sub_coll in grp_stock_ref.collections():
@@ -131,7 +142,7 @@ def stock_report(group_id):
         import logging
         logging.exception("stock_report Source 2a-extra (Android STOCK) error (%s): %s", group_id, e)
 
-    # ── Source 2b: original project — STOCK_OUT/{productName} map documents ─────
+    # â”€â”€ Source 2b: original project â€” STOCK_OUT/{productName} map documents â”€â”€â”€â”€â”€
     so2b_names: set = set()
     try:
         for pd in db.collection(C.PRODUCTS).where("group_id", "==", group_id).get():
@@ -163,7 +174,7 @@ def stock_report(group_id):
                 "stock_report Source 2b (STOCK_OUT) error (%s, %s): %s", group_id, pn, e
             )
 
-    # ── Source 2b-extra: Android app — STOCK_OUT/{groupId} map document ──────────
+    # â”€â”€ Source 2b-extra: Android app â€” STOCK_OUT/{groupId} map document â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         android_so_doc = db.collection(C.STOCK_OUT).document(group_id).get()
         if android_so_doc.exists:
@@ -176,7 +187,9 @@ def stock_report(group_id):
 
     stock_in  = sorted(in_map.values(),  key=lambda e: e["date"], reverse=True)
     stock_out = sorted(out_map.values(), key=lambda e: e["date"], reverse=True)
-    return jsonify({"stockIn": stock_in, "stockOut": stock_out})
+    payload = {"stockIn": stock_in, "stockOut": stock_out}
+    set_cached_report('stock', group_id, payload)
+    return jsonify(payload)
 
 
 @reports_bp.route("/expenses", methods=["GET"])
@@ -191,3 +204,5 @@ def expenses_report(group_id):
 def income_report(group_id):
     """Returns all income entries for the group.   JSON: {"incomes": [...]}"""
     return _expenses_list(group_id, False)
+
+
