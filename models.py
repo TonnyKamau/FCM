@@ -140,10 +140,16 @@ def message_to_dict(doc_id, d):
         "isImageShared": d.get("is_image_shared") if "is_image_shared" in d else d.get("isImageShared", False),
         "isPoll":        d.get("is_poll")         if "is_poll"         in d else d.get("isPoll",        False),
         "isLoanRequest": d.get("is_loan_request") if "is_loan_request" in d else d.get("isLoanRequest", False),
-        "money":         d.get("money",   ""),
-        "image":         d.get("image",   ""),
-        "caption":       d.get("caption", ""),
-        "timestamp":     timestamp,
+        "money":            d.get("money",   ""),
+        "whoShared":       d.get("whoShared", "") or d.get("who_shared", ""),
+        "image":           d.get("image",   ""),
+        "caption":         d.get("caption", ""),
+        "voiceNoteUrl":    d.get("voiceNoteUrl", "") or d.get("voice_note_url", ""),
+        "voiceNoteDuration": int(d.get("voiceNoteDuration", 0) or d.get("voice_note_duration", 0) or 0),
+        "isVoiceNote":     d.get("is_voice_note") if "is_voice_note" in d else d.get("isVoiceNote", False),
+        "reactions":       d.get("reactions") or {},
+        "pollModel":       d.get("pollModel") or d.get("poll"),
+        "timestamp":       timestamp,
     }
 
 

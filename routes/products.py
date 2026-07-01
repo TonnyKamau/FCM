@@ -32,7 +32,20 @@ def _is_member(db, group_id, uid):
         )
         if gm:
             return True
-    # ── Original project: CHATS/{uid} map contains the group_id key ───────────
+    # ── New structure: USER_CHAT_PREVIEWS/{uid}/CHATS/{group_id} ─────────────
+    try:
+        preview_doc = (
+            db.collection(C.USER_CHAT_PREVIEWS)
+            .document(uid)
+            .collection(C.CHATS_SUBCOLLECTION)
+            .document(group_id)
+            .get()
+        )
+        if preview_doc.exists:
+            return True
+    except Exception:
+        pass
+    # ── Legacy: CHATS/{uid} map ───────────────────────────────────────────────
     try:
         chats_doc = db.collection(C.CHATS).document(uid).get()
         if chats_doc.exists:
@@ -42,6 +55,15 @@ def _is_member(db, group_id, uid):
     except Exception:
         pass
     return False
+
+
+def _bd_products_ref(db, group_id):
+    """Shorthand for BUSINESS_DATA/{groupId}/products subcollection."""
+    return (
+        db.collection(C.BUSINESS_DATA)
+        .document(group_id)
+        .collection(C.BD_PRODUCTS)
+    )
 
 
 @products_bp.route("", methods=["GET"])
@@ -64,11 +86,26 @@ def list_products(group_id):
         if cached is not None:
             return jsonify({"products": cached})
 
-    # ── Source 1: new backend — flat PRODUCTS collection with group_id field ──
-    docs = db.collection(C.PRODUCTS).where("group_id", "==", group_id).get()
-    product_map = {d.id: product_to_dict(d.id, d.to_dict()) for d in docs}
+    product_map = {}
 
-    # ── Source 2: original project — PRODUCTS/{groupId} single map document ──
+    # ── Source 1: Android path — BUSINESS_DATA/{groupId}/products ────────────
+    try:
+        bd_docs = _bd_products_ref(db, group_id).get()
+        for d in bd_docs:
+            product_map[d.id] = product_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # ── Source 2: new backend — flat PRODUCTS collection with group_id field ──
+    try:
+        docs = db.collection(C.PRODUCTS).where("group_id", "==", group_id).get()
+        for d in docs:
+            if d.id not in product_map:
+                product_map[d.id] = product_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # ── Source 3: original project — PRODUCTS/{groupId} single map document ──
     if not canonical_only:
         try:
             orig_doc = db.collection(C.PRODUCTS).document(group_id).get()
@@ -163,7 +200,15 @@ def create_product(group_id):
         "tax_rate":        float(data.get("tax_rate",     16.0) or data.get("taxRate",     16.0) or 16.0),
         "is_active":       bool (data.get("is_active",    True) if "is_active" in data else data.get("isActive", True)),
     }
-    db.collection(C.PRODUCTS).document(product_id).set(product_data)
+
+    # ── Primary write: Android path BUSINESS_DATA/{groupId}/products/{productId} ──
+    _bd_products_ref(db, group_id).document(product_id).set(product_data)
+
+    # ── Legacy write: flat PRODUCTS collection (new backend) ─────────────────
+    try:
+        db.collection(C.PRODUCTS).document(product_id).set(product_data)
+    except Exception:
+        pass
 
     # Also write into the Android map-document format so the Android app sees it
     # PRODUCTS/{groupId} is a single document whose keys are product IDs
@@ -206,9 +251,15 @@ def update_product(group_id, product_id):
     if not _is_member(db, group_id, uid):
         return jsonify({"error": "Access denied"}), 403
 
-    doc = db.collection(C.PRODUCTS).document(product_id).get()
-    if not doc.exists or doc.to_dict().get("group_id") != group_id:
-        return jsonify({"error": "Product not found"}), 404
+    # Try Android path first, then flat collection
+    bd_ref = _bd_products_ref(db, group_id).document(product_id)
+    bd_doc = bd_ref.get()
+    if bd_doc.exists:
+        doc = bd_doc
+    else:
+        doc = db.collection(C.PRODUCTS).document(product_id).get()
+        if not doc.exists or doc.to_dict().get("group_id") != group_id:
+            return jsonify({"error": "Product not found"}), 404
 
     data = request.get_json() or {}
     updates = {}
@@ -237,7 +288,23 @@ def update_product(group_id, product_id):
             updates[db_key] = bool(data[req_key])
 
     doc.reference.update(updates)
-    updated = db.collection(C.PRODUCTS).document(product_id).get()
+
+    # Mirror updates to Android path
+    try:
+        if not bd_doc.exists:
+            bd_ref.set({**doc.to_dict(), **updates}, merge=True)
+        else:
+            bd_ref.update(updates)
+    except Exception:
+        pass
+
+    # Mirror update into flat PRODUCTS collection
+    try:
+        flat_doc = db.collection(C.PRODUCTS).document(product_id).get()
+        if flat_doc.exists:
+            flat_doc.reference.update(updates)
+    except Exception:
+        pass
 
     # Mirror update into Android map-document format
     try:
@@ -248,6 +315,7 @@ def update_product(group_id, product_id):
 
     invalidate_products(group_id)
     invalidate_group_payload("products_canonical", group_id)
+    updated = doc.reference.get()
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})
 
 
@@ -258,10 +326,23 @@ def delete_product(group_id, product_id):
     db = get_db()
     if not _is_member(db, group_id, uid):
         return jsonify({"error": "Access denied"}), 403
-    doc = db.collection(C.PRODUCTS).document(product_id).get()
-    if not doc.exists or doc.to_dict().get("group_id") != group_id:
+
+    # Delete from Android path
+    bd_ref = _bd_products_ref(db, group_id).document(product_id)
+    bd_doc = bd_ref.get()
+    found = False
+    if bd_doc.exists:
+        bd_ref.delete()
+        found = True
+
+    # Delete from flat PRODUCTS collection
+    flat_doc = db.collection(C.PRODUCTS).document(product_id).get()
+    if flat_doc.exists and flat_doc.to_dict().get("group_id") == group_id:
+        flat_doc.reference.delete()
+        found = True
+
+    if not found:
         return jsonify({"error": "Product not found"}), 404
-    doc.reference.delete()
 
     # Remove from Android map-document format too
     try:
@@ -282,9 +363,16 @@ def adjust_stock(group_id, product_id):
     db = get_db()
     if not _is_member(db, group_id, uid):
         return jsonify({"error": "Access denied"}), 403
-    doc = db.collection(C.PRODUCTS).document(product_id).get()
-    if not doc.exists or doc.to_dict().get("group_id") != group_id:
-        return jsonify({"error": "Product not found"}), 404
+
+    # Try Android path first
+    bd_ref = _bd_products_ref(db, group_id).document(product_id)
+    bd_doc = bd_ref.get()
+    if bd_doc.exists:
+        doc = bd_doc
+    else:
+        doc = db.collection(C.PRODUCTS).document(product_id).get()
+        if not doc.exists or doc.to_dict().get("group_id") != group_id:
+            return jsonify({"error": "Product not found"}), 404
 
     data = request.get_json() or {}
     delta = int(data.get("delta", 0))
@@ -292,7 +380,22 @@ def adjust_stock(group_id, product_id):
     new_stock = max(0, current_stock + delta)
     doc.reference.update({"available_stock": new_stock})
 
-    # Mirror to Android map doc — set(merge=True) avoids a pre-read existence check
+    # Mirror to Android path if not already there
+    try:
+        if not bd_doc.exists:
+            bd_ref.set({"available_stock": new_stock}, merge=True)
+        else:
+            bd_ref.update({"available_stock": new_stock})
+    except Exception:
+        pass
+
+    # Mirror to flat PRODUCTS doc and legacy map doc
+    try:
+        flat_doc = db.collection(C.PRODUCTS).document(product_id).get()
+        if flat_doc.exists:
+            flat_doc.reference.update({"available_stock": new_stock})
+    except Exception:
+        pass
     try:
         db.collection(C.PRODUCTS).document(group_id).set(
             {product_id: {"available_stock": new_stock}}, merge=True
@@ -302,5 +405,5 @@ def adjust_stock(group_id, product_id):
 
     invalidate_products(group_id)
     invalidate_group_payload("products_canonical", group_id)
-    updated = db.collection(C.PRODUCTS).document(product_id).get()
+    updated = doc.reference.get()
     return jsonify({"product": product_to_dict(updated.id, updated.to_dict())})

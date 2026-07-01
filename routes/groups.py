@@ -1,4 +1,7 @@
+import logging
+
 from flask import Blueprint, request, jsonify
+from firebase_admin import messaging
 from firebase_utils import get_db
 from models import group_to_dict, group_member_to_dict
 from auth_utils import require_auth, get_jwt_identity
@@ -95,6 +98,27 @@ def list_groups():
         seen_ids.add(gid)
 
     if not canonical_only:
+        # ── New structure: USER_CHAT_PREVIEWS/{uid}/CHATS subcollection ──────
+        try:
+            preview_docs = (
+                db.collection(C.USER_CHAT_PREVIEWS)
+                .document(uid)
+                .collection(C.CHATS_SUBCOLLECTION)
+                .get()
+            )
+            for pdoc in preview_docs:
+                group_data = pdoc.to_dict() or {}
+                if not group_data.get("isBusinessGroup", False):
+                    continue
+                group_id_key = pdoc.id
+                if group_id_key in seen_ids:
+                    continue
+                actual_id = group_data.get("id", group_id_key)
+                result.append(group_to_dict(actual_id, group_data))
+                seen_ids.add(actual_id)
+        except Exception:
+            pass
+        # ── Legacy: CHATS/{uid} map ───────────────────────────────────────────
         try:
             chats_doc = db.collection(C.CHATS).document(uid).get()
             if chats_doc.exists:
@@ -226,4 +250,304 @@ def assign_role(group_id, member_id):
     invalidate_user_payload("groups_canonical", uid)
     invalidate_user_payload("groups", member_id)
     invalidate_user_payload("groups_canonical", member_id)
+    return jsonify({"group": _build_group(db, group_id)})
+
+
+# ─── Member management ──────────────────────────────────────────────────────────
+
+@groups_bp.route("/<group_id>/members", methods=["GET"])
+@require_auth
+def list_members(group_id):
+    uid = get_jwt_identity()
+    db = get_db()
+    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    if not group_doc.exists:
+        return jsonify({"error": "Group not found"}), 404
+
+    member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
+    members = []
+    for md in member_docs:
+        mdata = md.to_dict() or {}
+        members.append({
+            "id":       mdata.get("user_id", ""),
+            "role":     mdata.get("role", "member"),
+            "name":     mdata.get("member_name", ""),
+            "email":    mdata.get("member_email", ""),
+            "phone":    mdata.get("member_phone", ""),
+            "image":    mdata.get("member_image", ""),
+            "photoUrl": mdata.get("member_photo_url", ""),
+        })
+    return jsonify({"members": members})
+
+
+@groups_bp.route("/<group_id>/members", methods=["POST"])
+@require_auth
+def add_member(group_id):
+    uid = get_jwt_identity()
+    db = get_db()
+    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    if not group_doc.exists:
+        return jsonify({"error": "Group not found"}), 404
+    gd = group_doc.to_dict() or {}
+
+    # Only admin / owner can add members
+    if gd.get("admin_id") != uid:
+        # Allow if caller is an OWNER-role member
+        caller_docs = list(
+            db.collection(C.GROUP_MEMBERS)
+            .where("group_id", "==", group_id)
+            .where("user_id", "==", uid)
+            .limit(1).get()
+        )
+        if not caller_docs or caller_docs[0].to_dict().get("role", "").upper() not in ("OWNER", "ADMIN"):
+            return jsonify({"error": "Only group admins can add members"}), 403
+
+    data = request.get_json() or {}
+    email = data.get("email", "").strip().lower()
+    user_id = data.get("userId", "").strip()
+    role = data.get("role", "member")
+
+    if not email and not user_id:
+        return jsonify({"error": "email or userId is required"}), 400
+
+    # Look up user
+    new_user_doc = None
+    new_uid = user_id
+    if email:
+        user_docs = list(db.collection(C.USERS).where("email", "==", email).limit(1).get())
+        if not user_docs:
+            return jsonify({"error": f"No user found with email {email}"}), 404
+        new_user_doc = user_docs[0]
+        new_uid = new_user_doc.id
+    elif user_id:
+        doc = db.collection(C.USERS).document(user_id).get()
+        if not doc.exists:
+            return jsonify({"error": "User not found"}), 404
+        new_user_doc = doc
+
+    if new_uid == uid and gd.get("admin_id") == uid:
+        return jsonify({"error": "Admin is already a member"}), 400
+
+    # Check if already a member
+    existing = list(
+        db.collection(C.GROUP_MEMBERS)
+        .where("group_id", "==", group_id)
+        .where("user_id", "==", new_uid)
+        .limit(1).get()
+    )
+    if existing:
+        return jsonify({"error": "User is already a member of this group"}), 409
+
+    user_data = new_user_doc.to_dict() if new_user_doc else {}
+    member_payload = {
+        "group_id": group_id,
+        **_member_summary(new_uid, role, user_data, fallback_email=email),
+    }
+    db.collection(C.GROUP_MEMBERS).document(str(uuid.uuid4())).set(member_payload)
+
+    # Write chat preview for new member
+    now = _now_ms()
+    preview_ref = (
+        db.collection(C.USER_CHAT_PREVIEWS)
+        .document(new_uid)
+        .collection(C.CHATS_SUBCOLLECTION)
+        .document(group_id)
+    )
+    preview_data = {
+        "id":            group_id,
+        "name":          gd.get("name", ""),
+        "image":         gd.get("image", ""),
+        "lastMessage":   gd.get("last_message", ""),
+        "timestamp":     now,
+        "isGroup":       gd.get("is_group", True),
+        "adminID":       gd.get("admin_id", ""),
+        "userID":        new_uid,
+        "unreadCount":   0,
+        "isMoneyShared": False,
+        "isImageShared": False,
+        "isVoiceNote":   False,
+        "whoShared":     "",
+        "money":         "",
+        "isBusinessGroup": gd.get("is_business_group", True),
+    }
+    try:
+        preview_ref.set(preview_data, merge=True)
+    except Exception as exc:
+        logging.warning("Could not write chat preview for new member: %s", exc)
+
+    # Send FCM notification
+    try:
+        fcm_token = user_data.get(C.FCM_TOKEN_FIELD, "")
+        if fcm_token:
+            group_name = gd.get("name", "a group")
+            fcm_message = messaging.Message(
+                notification=messaging.Notification(
+                    title="Added to group",
+                    body=f"You have been added to {group_name}",
+                ),
+                token=fcm_token,
+            )
+            messaging.send(fcm_message)
+    except Exception as exc:
+        logging.warning("FCM notification failed for new member: %s", exc)
+
+    invalidate_user_payload("groups", new_uid)
+    invalidate_user_payload("groups_canonical", new_uid)
+
+    return jsonify({"group": _build_group(db, group_id)}), 201
+
+
+@groups_bp.route("/<group_id>/members/<member_id>", methods=["DELETE"])
+@require_auth
+def remove_member(group_id, member_id):
+    uid = get_jwt_identity()
+    db = get_db()
+    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    if not group_doc.exists:
+        return jsonify({"error": "Group not found"}), 404
+    gd = group_doc.to_dict() or {}
+
+    # Members can remove themselves; admins can remove anyone
+    if member_id != uid and gd.get("admin_id") != uid:
+        caller_docs = list(
+            db.collection(C.GROUP_MEMBERS)
+            .where("group_id", "==", group_id)
+            .where("user_id", "==", uid)
+            .limit(1).get()
+        )
+        if not caller_docs or caller_docs[0].to_dict().get("role", "").upper() not in ("OWNER", "ADMIN"):
+            return jsonify({"error": "Only group admins can remove other members"}), 403
+
+    if member_id == gd.get("admin_id"):
+        return jsonify({"error": "Cannot remove the group owner"}), 400
+
+    # Delete from GROUP_MEMBERS
+    gm_docs = list(
+        db.collection(C.GROUP_MEMBERS)
+        .where("group_id", "==", group_id)
+        .where("user_id", "==", member_id)
+        .get()
+    )
+    for gm in gm_docs:
+        gm.reference.delete()
+
+    # Delete their chat preview
+    try:
+        (
+            db.collection(C.USER_CHAT_PREVIEWS)
+            .document(member_id)
+            .collection(C.CHATS_SUBCOLLECTION)
+            .document(group_id)
+            .delete()
+        )
+    except Exception as exc:
+        logging.warning("Could not delete chat preview for removed member: %s", exc)
+
+    invalidate_user_payload("groups", member_id)
+    invalidate_user_payload("groups_canonical", member_id)
+    invalidate_user_payload("groups", uid)
+    invalidate_user_payload("groups_canonical", uid)
+
+    return jsonify({"group": _build_group(db, group_id)})
+
+
+# ─── Group settings ───────────────────────────────────────────────────────────
+
+_SETTINGS_FIELDS = [
+    "name",
+    "image",
+    "restrictMoneyAfterLoanRequest",
+    "requireAdminApprovalForLoans",
+    "allowMemberStatementAccess",
+    "allowDirectMemberAccountWithdrawals",
+    "allowMembersToViewOtherMemberBalances",
+]
+
+_SETTINGS_DB_MAP = {
+    "name": "name",
+    "image": "image",
+    "restrictMoneyAfterLoanRequest": "restrict_money_after_loan",
+    "requireAdminApprovalForLoans": "require_admin_approval_loans",
+    "allowMemberStatementAccess": "allow_member_statement_access",
+    "allowDirectMemberAccountWithdrawals": "allow_direct_member_account_withdrawals",
+    "allowMembersToViewOtherMemberBalances": "allow_members_to_view_other_member_balances",
+}
+
+
+@groups_bp.route("/<group_id>/settings", methods=["GET"])
+@require_auth
+def get_settings(group_id):
+    uid = get_jwt_identity()
+    db = get_db()
+    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    if not group_doc.exists:
+        return jsonify({"error": "Group not found"}), 404
+    gd = group_doc.to_dict() or {}
+    settings = {
+        "name":                                 gd.get("name", ""),
+        "image":                                gd.get("image", ""),
+        "restrictMoneyAfterLoanRequest":        gd.get("restrict_money_after_loan", False),
+        "requireAdminApprovalForLoans":         gd.get("require_admin_approval_loans", False),
+        "allowMemberStatementAccess":           gd.get("allow_member_statement_access", False),
+        "allowDirectMemberAccountWithdrawals":  gd.get("allow_direct_member_account_withdrawals", False),
+        "allowMembersToViewOtherMemberBalances": gd.get("allow_members_to_view_other_member_balances", False),
+    }
+    return jsonify({"settings": settings})
+
+
+@groups_bp.route("/<group_id>/settings", methods=["PUT"])
+@require_auth
+def update_settings(group_id):
+    uid = get_jwt_identity()
+    db = get_db()
+    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    if not group_doc.exists:
+        return jsonify({"error": "Group not found"}), 404
+    gd = group_doc.to_dict() or {}
+
+    if gd.get("admin_id") != uid:
+        return jsonify({"error": "Only the group owner can update settings"}), 403
+
+    data = request.get_json() or {}
+    updates = {}
+    for field in _SETTINGS_FIELDS:
+        if field in data:
+            db_key = _SETTINGS_DB_MAP[field]
+            updates[db_key] = data[field]
+
+    if not updates:
+        return jsonify({"error": "No valid settings fields provided"}), 400
+
+    try:
+        db.collection(C.GROUP_ACCOUNTS).document(group_id).update(updates)
+    except Exception as exc:
+        logging.exception("Failed to update group settings: %s", exc)
+        return jsonify({"error": "Failed to update settings"}), 500
+
+    # Propagate name/image change to all members' chat previews
+    preview_updates = {}
+    if "name" in updates:
+        preview_updates["name"] = updates["name"]
+    if "image" in updates:
+        preview_updates["image"] = updates["image"]
+
+    if preview_updates:
+        try:
+            member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
+            for md in member_docs:
+                mid = md.to_dict().get("user_id", "")
+                if mid:
+                    (
+                        db.collection(C.USER_CHAT_PREVIEWS)
+                        .document(mid)
+                        .collection(C.CHATS_SUBCOLLECTION)
+                        .document(group_id)
+                        .set(preview_updates, merge=True)
+                    )
+        except Exception as exc:
+            logging.warning("Could not propagate settings to previews: %s", exc)
+
+    invalidate_user_payload("groups", uid)
+    invalidate_user_payload("groups_canonical", uid)
+
     return jsonify({"group": _build_group(db, group_id)})

@@ -13,11 +13,14 @@ from routes.sales import sales_bp
 from routes.customers import customers_bp
 from routes.stock import stock_bp
 from routes.messages import messages_bp
+from routes.group_accounts import group_accounts_bp
+from routes.direct_messages import direct_messages_bp
 from routes.licenses import licenses_bp
 from routes.notifications import notifications_bp
 from routes.expenses import expenses_bp, income_bp
 from routes.reports import reports_bp
 from routes.mpesa import mpesa_bp
+from routes.dashboard import dashboard_bp
 
 app = Flask(__name__)
 app.config["API_KEY"] = API_KEY
@@ -338,12 +341,15 @@ app.register_blueprint(sales_bp)
 app.register_blueprint(customers_bp)
 app.register_blueprint(stock_bp)
 app.register_blueprint(messages_bp)
+app.register_blueprint(group_accounts_bp)
+app.register_blueprint(direct_messages_bp)
 app.register_blueprint(licenses_bp)
 app.register_blueprint(notifications_bp)
 app.register_blueprint(expenses_bp)
 app.register_blueprint(income_bp)
 app.register_blueprint(reports_bp)
 app.register_blueprint(mpesa_bp)
+app.register_blueprint(dashboard_bp)
 
 
 @app.after_request
@@ -377,7 +383,18 @@ def _cors(response):
 @app.route("/groups/<group_id>/customers/<customer_id>/payments", methods=["OPTIONS"])
 @app.route("/groups/<group_id>/stock/in", methods=["OPTIONS"])
 @app.route("/groups/<group_id>/stock/out", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/members", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/members/<member_id>", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/settings", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/accounts", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/accounts/<account_id>/transactions", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/accounts/<account_id>/deposit", methods=["OPTIONS"])
+@app.route("/messages/direct/<other_user_id>", methods=["OPTIONS"])
+@app.route("/messages/direct/<other_user_id>/read", methods=["OPTIONS"])
+@app.route("/chats", methods=["OPTIONS"])
 @app.route("/groups/<group_id>/messages", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/messages/<message_id>/react", methods=["OPTIONS"])
+@app.route("/groups/<group_id>/messages/<message_id>/poll/vote", methods=["OPTIONS"])
 @app.route("/groups/<group_id>/expenses", methods=["OPTIONS"])
 @app.route("/groups/<group_id>/expenses/<entry_id>", methods=["OPTIONS"])
 @app.route("/groups/<group_id>/income", methods=["OPTIONS"])

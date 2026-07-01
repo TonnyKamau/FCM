@@ -77,7 +77,22 @@ def _check_member(db, group_id, uid):
         )
         if gm:
             return True, gd.get("admin_id")
-    # ── Original project: CHATS/{uid} map contains the group_id key ──────────
+    # ── New structure: USER_CHAT_PREVIEWS/{uid}/CHATS/{group_id} ─────────────
+    try:
+        preview_doc = (
+            db.collection("USER_CHAT_PREVIEWS")
+            .document(uid)
+            .collection("CHATS")
+            .document(group_id)
+            .get()
+        )
+        if preview_doc.exists:
+            gdata    = preview_doc.to_dict() or {}
+            admin_id = gdata.get("adminID", "") or gdata.get("admin_id", "") or None
+            return True, admin_id
+    except Exception:
+        pass
+    # ── Legacy: CHATS/{uid} map contains the group_id key ────────────────────
     try:
         chats_doc = db.collection(_CHATS).document(uid).get()
         if chats_doc.exists:

@@ -17,6 +17,9 @@ STOCK             = "STOCK"
 STOCK_OUT         = "STOCK_OUT"
 CHATS             = "CHATS"
 MESSAGES          = "MESSAGES"
+USER_CHAT_PREVIEWS = "USER_CHAT_PREVIEWS"
+CHATS_SUBCOLLECTION = "CHATS"   # subcollection under USER_CHAT_PREVIEWS/{userId}
+MESSAGES_SUBCOLLECTION = "MESSAGES"  # subcollection under CHATS/{chatId}
 GROUP_ACCOUNTS    = "GroupAccounts"
 GROUP_MEMBERS     = "GroupMembers"
 
@@ -33,6 +36,17 @@ LOAN_REQUESTS        = "LOAN_REQUESTS"
 EXTENSION_REQUESTS   = "EXTENSION_REQUESTS"
 BORROWER_REVIEWS     = "BORROWER_REVIEWS"
 KYC_VERIFICATIONS    = "KYC_VERIFICATIONS"
+
+# ── Android BUSINESS_DATA root ───────────────────────────────────────────────
+# Android stores all business data under BUSINESS_DATA/{groupId}/{subcollection}
+BUSINESS_DATA         = "BUSINESS_DATA"
+
+# Subcollection names used under BUSINESS_DATA/{groupId}/
+BD_PRODUCTS           = "products"
+BD_SALES              = "sales"
+BD_STOCK_MOVEMENTS    = "stock_movements"
+BD_CUSTOMERS          = "customers"
+BD_CUSTOMER_PAYMENTS  = "customer_payments"
 
 # ── Subcollection names ────────────────────────────────────────────────────────
 SALES_SUBCOLLECTION   = "sales"

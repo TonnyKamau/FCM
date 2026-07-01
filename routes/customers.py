@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from firebase_utils import get_db
-from models import customer_to_dict, customer_payment_to_dict
+from models import customer_to_dict, customer_payment_to_dict, sale_to_dict
 from auth_utils import require_auth, get_jwt_identity
 import db_constants as C
 import uuid
@@ -28,7 +28,20 @@ def _is_member(db, group_id, uid):
         )
         if gm:
             return True
-    # ── Original project: CHATS/{uid} map contains the group_id key ───────────
+    # ── New structure: USER_CHAT_PREVIEWS/{uid}/CHATS/{group_id} ─────────────
+    try:
+        preview_doc = (
+            db.collection(C.USER_CHAT_PREVIEWS)
+            .document(uid)
+            .collection(C.CHATS_SUBCOLLECTION)
+            .document(group_id)
+            .get()
+        )
+        if preview_doc.exists:
+            return True
+    except Exception:
+        pass
+    # ── Legacy: CHATS/{uid} map ───────────────────────────────────────────────
     try:
         chats_doc = db.collection(C.CHATS).document(uid).get()
         if chats_doc.exists:
@@ -38,6 +51,66 @@ def _is_member(db, group_id, uid):
     except Exception:
         pass
     return False
+
+
+def _bd_customers_ref(db, group_id):
+    """BUSINESS_DATA/{groupId}/customers subcollection."""
+    return (
+        db.collection(C.BUSINESS_DATA)
+        .document(group_id)
+        .collection(C.BD_CUSTOMERS)
+    )
+
+
+def _bd_payments_ref(db, group_id):
+    """BUSINESS_DATA/{groupId}/customer_payments subcollection."""
+    return (
+        db.collection(C.BUSINESS_DATA)
+        .document(group_id)
+        .collection(C.BD_CUSTOMER_PAYMENTS)
+    )
+
+
+def _bd_sales_ref(db, group_id):
+    """BUSINESS_DATA/{groupId}/sales subcollection."""
+    return (
+        db.collection(C.BUSINESS_DATA)
+        .document(group_id)
+        .collection(C.BD_SALES)
+    )
+
+
+def _resolve_customer(db, group_id, customer_id):
+    """
+    Return (doc_ref, doc_snapshot) for a customer across Android, flat, and legacy paths.
+    Returns (None, None) if not found.
+    """
+    # Android path
+    bd_ref = _bd_customers_ref(db, group_id).document(customer_id)
+    bd_doc = bd_ref.get()
+    if bd_doc.exists:
+        return bd_ref, bd_doc
+
+    # Flat Customers collection
+    flat_doc = db.collection(C.CUSTOMERS).document(customer_id).get()
+    if flat_doc.exists and flat_doc.to_dict().get("group_id") == group_id:
+        return flat_doc.reference, flat_doc
+
+    # Original nested format
+    try:
+        orig_ref = (
+            db.collection(C.CUSTOMERS)
+            .document(group_id)
+            .collection("customers")
+            .document(customer_id)
+        )
+        orig_doc = orig_ref.get()
+        if orig_doc.exists:
+            return orig_ref, orig_doc
+    except Exception:
+        pass
+
+    return None, None
 
 
 @customers_bp.route("", methods=["GET"])
@@ -55,11 +128,25 @@ def list_customers(group_id):
     if cached_payload is not None:
         return jsonify(cached_payload)
 
-    # ── Source 1: new backend — flat Customers collection with group_id field ─
-    docs = db.collection(C.CUSTOMERS).where("group_id", "==", group_id).get()
-    cust_map = {d.id: customer_to_dict(d.id, d.to_dict()) for d in docs}
+    cust_map = {}
 
-    # ── Source 2: original project — Customers/{groupId}/customers subcollection
+    # ── Source 1: Android path — BUSINESS_DATA/{groupId}/customers ───────────
+    try:
+        for d in _bd_customers_ref(db, group_id).get():
+            cust_map[d.id] = customer_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # ── Source 2: flat Customers collection ───────────────────────────────────
+    try:
+        docs = db.collection(C.CUSTOMERS).where("group_id", "==", group_id).get()
+        for d in docs:
+            if d.id not in cust_map:
+                cust_map[d.id] = customer_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # ── Source 3: original — Customers/{groupId}/customers subcollection ──────
     if not canonical_only:
         try:
             orig_docs = (
@@ -78,6 +165,22 @@ def list_customers(group_id):
     payload = {"customers": customers}
     set_cached_group_payload(cache_name, group_id, payload)
     return jsonify(payload)
+
+
+@customers_bp.route("/<customer_id>", methods=["GET"])
+@require_auth
+def get_customer(group_id, customer_id):
+    uid = get_jwt_identity()
+    db = get_db()
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
+        return jsonify({"error": "Access denied"}), 403
+
+    ref, doc = _resolve_customer(db, group_id, customer_id)
+    if doc is None:
+        return jsonify({"error": "Customer not found"}), 404
+
+    return jsonify({"customer": customer_to_dict(doc.id, doc.to_dict())})
 
 
 @customers_bp.route("", methods=["POST"])
@@ -111,9 +214,17 @@ def create_customer(group_id):
         "secondary_phone": data.get("secondaryPhone", "") or data.get("secondary_phone", ""),
         "category":        data.get("category", ""),
     }
-    db.collection(C.CUSTOMERS).document(cust_id).set(cust_data)
 
-    # Also write to original format: Customers/{groupId}/customers/{custId}
+    # ── Primary: Android path BUSINESS_DATA/{groupId}/customers/{custId} ─────
+    _bd_customers_ref(db, group_id).document(cust_id).set(cust_data)
+
+    # ── Legacy: flat Customers collection ────────────────────────────────────
+    try:
+        db.collection(C.CUSTOMERS).document(cust_id).set(cust_data)
+    except Exception:
+        pass
+
+    # ── Legacy: original nested format Customers/{groupId}/customers/{custId} ─
     try:
         db.collection(C.CUSTOMERS).document(group_id).collection("customers").document(cust_id).set({
             "id":               cust_id,
@@ -147,22 +258,9 @@ def update_customer(group_id, customer_id):
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
-    doc = db.collection(C.CUSTOMERS).document(customer_id).get()
-    if not (doc.exists and doc.to_dict().get("group_id") == group_id):
-        try:
-            orig_ref = (
-                db.collection(C.CUSTOMERS)
-                .document(group_id)
-                .collection("customers")
-                .document(customer_id)
-            )
-            orig_doc = orig_ref.get()
-            if orig_doc.exists:
-                doc = orig_doc
-            else:
-                return jsonify({"error": "Customer not found"}), 404
-        except Exception:
-            return jsonify({"error": "Customer not found"}), 404
+    ref, doc = _resolve_customer(db, group_id, customer_id)
+    if doc is None:
+        return jsonify({"error": "Customer not found"}), 404
 
     data = request.get_json() or {}
     updates = {}
@@ -187,6 +285,18 @@ def update_customer(group_id, customer_id):
         updates["is_active"] = bool(data["is_active"])
 
     doc.reference.update(updates)
+
+    # Mirror to Android path if primary was not Android
+    try:
+        bd_ref = _bd_customers_ref(db, group_id).document(customer_id)
+        bd_doc = bd_ref.get()
+        if bd_doc.exists:
+            bd_ref.update(updates)
+        else:
+            bd_ref.set({**doc.to_dict(), **updates}, merge=True)
+    except Exception:
+        pass
+
     invalidate_group_payload("customers", group_id)
     invalidate_group_payload("customers_canonical", group_id)
     updated = doc.reference.get()
@@ -201,13 +311,85 @@ def delete_customer(group_id, customer_id):
     is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
-    doc = db.collection(C.CUSTOMERS).document(customer_id).get()
-    if not doc.exists or doc.to_dict().get("group_id") != group_id:
+
+    ref, doc = _resolve_customer(db, group_id, customer_id)
+    if doc is None:
         return jsonify({"error": "Customer not found"}), 404
+
     doc.reference.delete()
+
+    # Also delete from Android path if different
+    try:
+        bd_ref = _bd_customers_ref(db, group_id).document(customer_id)
+        if bd_ref != ref:
+            bd_ref.delete()
+    except Exception:
+        pass
+
     invalidate_group_payload("customers", group_id)
     invalidate_group_payload("customers_canonical", group_id)
     return jsonify({"message": "Customer deleted"})
+
+
+@customers_bp.route("/<customer_id>/sales", methods=["GET"])
+@require_auth
+def customer_sales(group_id, customer_id):
+    """
+    Return all credit sales attributed to this customer.
+
+    Reads from BUSINESS_DATA/{groupId}/sales (primary) and flat CREDIT_SALE collection.
+    """
+    uid = get_jwt_identity()
+    db = get_db()
+    is_mem, _ = cached_is_member(group_id, uid, lambda: (_is_member(db, group_id, uid), None))
+    if not is_mem:
+        return jsonify({"error": "Access denied"}), 403
+
+    ref, cust_doc = _resolve_customer(db, group_id, customer_id)
+    if cust_doc is None:
+        return jsonify({"error": "Customer not found"}), 404
+
+    sale_map = {}
+
+    # ── Source 1: Android BUSINESS_DATA/{groupId}/sales ──────────────────────
+    try:
+        for d in (
+            _bd_sales_ref(db, group_id)
+            .where("customer_id", "==", customer_id)
+            .get()
+        ):
+            sale_map[d.id] = sale_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # ── Source 2: flat CREDIT_SALE collection ─────────────────────────────────
+    try:
+        for d in (
+            db.collection(C.CREDIT_SALE)
+            .where("group_id", "==", group_id)
+            .where("customer_id", "==", customer_id)
+            .get()
+        ):
+            if d.id not in sale_map:
+                sale_map[d.id] = sale_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # Also include customerId (camelCase) variant in case old data uses it
+    try:
+        for d in (
+            db.collection(C.CREDIT_SALE)
+            .where("group_id", "==", group_id)
+            .where("customerId", "==", customer_id)
+            .get()
+        ):
+            if d.id not in sale_map:
+                sale_map[d.id] = sale_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    sales = sorted(sale_map.values(), key=lambda s: s["date"], reverse=True)
+    return jsonify({"sales": sales, "count": len(sales)})
 
 
 @customers_bp.route("/<customer_id>/payments", methods=["POST"])
@@ -219,22 +401,9 @@ def record_payment(group_id, customer_id):
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
-    cust_doc = db.collection(C.CUSTOMERS).document(customer_id).get()
-    if not (cust_doc.exists and cust_doc.to_dict().get("group_id") == group_id):
-        try:
-            orig_ref = (
-                db.collection(C.CUSTOMERS)
-                .document(group_id)
-                .collection("customers")
-                .document(customer_id)
-            )
-            orig_cust = orig_ref.get()
-            if orig_cust.exists:
-                cust_doc = orig_cust
-            else:
-                return jsonify({"error": "Customer not found"}), 404
-        except Exception:
-            return jsonify({"error": "Customer not found"}), 404
+    ref, cust_doc = _resolve_customer(db, group_id, customer_id)
+    if cust_doc is None:
+        return jsonify({"error": "Customer not found"}), 404
 
     data = request.get_json() or {}
     amount = float(data.get("amount", 0))
@@ -244,20 +413,26 @@ def record_payment(group_id, customer_id):
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     payment_id = str(uuid.uuid4())
     payment_data = {
-        "group_id":    group_id,
-        "customer_id": customer_id,
-        "amount":      amount,
-        "method":      data.get("method", "cash"),
-        "notes":       data.get("notes", "") or "",
-        "created_by":  uid,
+        "group_id":     group_id,
+        "customer_id":  customer_id,
+        "amount":       amount,
+        "method":       data.get("method", "cash"),
+        "notes":        data.get("notes", "") or "",
+        "created_by":   uid,
         "is_allocated": True,
-        "timestamp":   now,
+        "timestamp":    now,
     }
 
-    # Write to flat CUSTOMER_PAYMENTS collection (new backend format)
-    db.collection(C.CUSTOMER_PAYMENTS).document(payment_id).set(payment_data)
+    # ── Primary: Android path BUSINESS_DATA/{groupId}/customer_payments/{id} ──
+    _bd_payments_ref(db, group_id).document(payment_id).set(payment_data)
 
-    # Also write to Windows Flutter format: CustomerPayments/{groupId} map document
+    # ── Legacy: flat CustomerPayments collection ───────────────────────────────
+    try:
+        db.collection(C.CUSTOMER_PAYMENTS).document(payment_id).set(payment_data)
+    except Exception:
+        pass
+
+    # ── Legacy: Windows Flutter format — CustomerPayments/{groupId} map doc ───
     try:
         db.collection(C.CUSTOMER_PAYMENTS).document(group_id).set({
             payment_id: {
@@ -274,7 +449,7 @@ def record_payment(group_id, customer_id):
     except Exception:
         pass
 
-    # Also write to Android format
+    # ── Legacy: Android subcollection format ─────────────────────────────────
     try:
         db.collection(C.CUSTOMER_PAYMENTS).document(group_id) \
             .collection("customers").document(customer_id) \
@@ -298,11 +473,21 @@ def record_payment(group_id, customer_id):
     old_total_paid = float(cust_dict.get("totalPaid", 0.0) or 0.0)
     new_balance    = max(0.0, old_balance - amount)
     new_total_paid = old_total_paid + amount
-    cust_doc.reference.update({
+    balance_update = {
         "balance":   new_balance,
         "totalDebt": new_balance,
         "totalPaid": new_total_paid,
-    })
+    }
+    cust_doc.reference.update(balance_update)
+
+    # Mirror balance update to Android path
+    try:
+        bd_cust_ref = _bd_customers_ref(db, group_id).document(customer_id)
+        bd_cust_doc = bd_cust_ref.get()
+        if bd_cust_doc.exists and bd_cust_ref != ref:
+            bd_cust_ref.update(balance_update)
+    except Exception:
+        pass
 
     invalidate_group_payload("customers", group_id)
     invalidate_group_payload("customers_canonical", group_id)
@@ -324,7 +509,18 @@ def list_payments(group_id, customer_id):
 
     pay_map = {}
 
-    # ── Source 1: flat CustomerPayments collection (new backend) ──────────────
+    # ── Source 1: Android path BUSINESS_DATA/{groupId}/customer_payments ─────
+    try:
+        for d in (
+            _bd_payments_ref(db, group_id)
+            .where("customer_id", "==", customer_id)
+            .get()
+        ):
+            pay_map[d.id] = customer_payment_to_dict(d.id, d.to_dict())
+    except Exception:
+        pass
+
+    # ── Source 2: flat CustomerPayments collection (new backend) ──────────────
     try:
         docs = (
             db.collection(C.CUSTOMER_PAYMENTS)
@@ -332,11 +528,12 @@ def list_payments(group_id, customer_id):
             .get()
         )
         for d in docs:
-            pay_map[d.id] = customer_payment_to_dict(d.id, d.to_dict())
+            if d.id not in pay_map:
+                pay_map[d.id] = customer_payment_to_dict(d.id, d.to_dict())
     except Exception:
         pass
 
-    # ── Source 2: Windows Flutter format — CustomerPayments/{groupId} map doc ──
+    # ── Source 3: Windows Flutter format — CustomerPayments/{groupId} map doc ──
     try:
         win_doc = db.collection(C.CUSTOMER_PAYMENTS).document(group_id).get()
         if win_doc.exists:
@@ -355,7 +552,7 @@ def list_payments(group_id, customer_id):
     except Exception:
         pass
 
-    # ── Source 3: Android format ───────────────────────────────────────────────
+    # ── Source 4: Android subcollection format ─────────────────────────────────
     try:
         android_docs = (
             db.collection(C.CUSTOMER_PAYMENTS)

@@ -34,7 +34,7 @@ def invalidate_member(group_id: str, uid: str):
 
 # ── Product-list response cache ────────────────────────────────────────────────
 # Key: group_id  →  (products_list, expiry: float)
-_PRODUCT_TTL = 75  # seconds — slightly less than Flutter's 30 s poll interval
+_PRODUCT_TTL = 240  # seconds; aligns with the Flutter app's slower polling.
 _product_cache: dict = {}
 
 def get_cached_products(group_id: str):
@@ -57,7 +57,7 @@ def invalidate_products(group_id: str):
 
 # -- Report response cache -----------------------------------------------------
 # Key: (report_type, group_id) -> (payload, expiry: float)
-_REPORT_TTL = 75
+_REPORT_TTL = 300
 _report_cache: dict = {}
 
 def get_cached_report(report_type: str, group_id: str):
@@ -79,7 +79,7 @@ def invalidate_report(report_type: str, group_id: str):
 
 # -- Generic group response cache ---------------------------------------------
 # Key: (cache_name, group_id) -> (payload, expiry: float)
-_GROUP_PAYLOAD_TTL = 75
+_GROUP_PAYLOAD_TTL = 240
 _group_payload_cache: dict = {}
 
 def get_cached_group_payload(cache_name: str, group_id: str):
@@ -101,7 +101,7 @@ def invalidate_group_payload(cache_name: str, group_id: str):
 
 # -- Per-user response cache --------------------------------------------------
 # Key: (cache_name, user_id) -> (payload, expiry: float)
-_USER_PAYLOAD_TTL = 75
+_USER_PAYLOAD_TTL = 240
 _user_payload_cache: dict = {}
 
 def get_cached_user_payload(cache_name: str, user_id: str):
