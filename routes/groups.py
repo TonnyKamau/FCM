@@ -3,7 +3,7 @@ import logging
 from flask import Blueprint, request, jsonify
 from firebase_admin import messaging
 from firebase_utils import get_db
-from models import group_to_dict, group_member_to_dict
+from models import group_to_dict, group_member_to_dict, group_member_from_chats
 from auth_utils import require_auth, get_jwt_identity
 from cache_utils import get_cached_user_payload, set_cached_user_payload, invalidate_user_payload
 import db_constants as C
@@ -50,6 +50,22 @@ def _build_group(db, group_id):
 
     member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
     members = [group_member_to_dict(md.to_dict()) for md in member_docs]
+
+    # Fallback: read members from legacy CHATS/{admin_id} map document
+    if not members:
+        admin_id = gd.get("admin_id", "")
+        if admin_id:
+            try:
+                chats_doc = db.collection(C.CHATS).document(admin_id).get()
+                if chats_doc.exists:
+                    chat_data = chats_doc.to_dict() or {}
+                    chat_group = chat_data.get(group_id, {})
+                    if isinstance(chat_group, dict):
+                        raw_members = chat_group.get("groupMembers", [])
+                        if isinstance(raw_members, list):
+                            members = [group_member_from_chats(m) for m in raw_members if isinstance(m, dict)]
+            except Exception:
+                pass
 
     return group_to_dict(doc.id, gd, members)
 
@@ -108,8 +124,6 @@ def list_groups():
             )
             for pdoc in preview_docs:
                 group_data = pdoc.to_dict() or {}
-                if not group_data.get("isBusinessGroup", False):
-                    continue
                 group_id_key = pdoc.id
                 if group_id_key in seen_ids:
                     continue
@@ -123,17 +137,17 @@ def list_groups():
             chats_doc = db.collection(C.CHATS).document(uid).get()
             if chats_doc.exists:
                 chat_data = chats_doc.to_dict() or {}
-                for group_id, group_data in chat_data.items():
+                for chat_key, group_data in chat_data.items():
                     if not isinstance(group_data, dict):
                         continue
-                    if not group_data.get("isBusinessGroup", False):
+                    if chat_key in seen_ids:
                         continue
-                    if group_id in seen_ids:
+                    actual_id = group_data.get("id", chat_key)
+                    if actual_id in seen_ids:
                         continue
-
-                    actual_id = group_data.get("id", group_id)
                     result.append(group_to_dict(actual_id, group_data))
                     seen_ids.add(actual_id)
+                    seen_ids.add(chat_key)
         except Exception:
             pass
 

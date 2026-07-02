@@ -133,7 +133,7 @@ def _list(group_id, is_expense_flag):
     entry_map = {d.id: _to_dict(d.id, d.to_dict()) for d in docs}
 
     # Source 2: original kitifms — EXPENSES/{adminId} single map document
-    if admin_id and not canonical_only:
+    if admin_id:
         try:
             orig_doc = db.collection(_EXPENSES).document(admin_id).get()
             if orig_doc.exists:

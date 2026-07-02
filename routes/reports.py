@@ -65,8 +65,12 @@ def sales_report(group_id):
 
     cash_docs   = db.collection(C.CASH_SALE  ).where("group_id", "==", group_id).get()
     credit_docs = db.collection(C.CREDIT_SALE).where("group_id", "==", group_id).get()
-    cash_map   = {d.id: sale_to_dict(d.id, d.to_dict()) for d in cash_docs}
-    credit_map = {d.id: sale_to_dict(d.id, d.to_dict()) for d in credit_docs}
+    cash_map = {d.id: sale_to_dict(d.id, d.to_dict()) for d in cash_docs}
+    credit_map = {}
+    for d in credit_docs:
+        data = d.to_dict() or {}
+        data.setdefault('is_credit', True)
+        credit_map[d.id] = sale_to_dict(d.id, data)
 
     # â”€â”€ Source 2: original project â€” nested subcollection structure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # IMPORTANT: use list_documents() NOT stream() for the product-name level.

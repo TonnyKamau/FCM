@@ -260,9 +260,14 @@ def list_sales(group_id):
     try:
         cash_docs   = db.collection(C.CASH_SALE  ).where("group_id", "==", group_id).get()
         credit_docs = db.collection(C.CREDIT_SALE).where("group_id", "==", group_id).get()
-        for d in list(cash_docs) + list(credit_docs):
+        for d in cash_docs:
             if d.id not in sale_map:
                 sale_map[d.id] = sale_to_dict(d.id, d.to_dict())
+        for d in credit_docs:
+            if d.id not in sale_map:
+                data = d.to_dict() or {}
+                data.setdefault('is_credit', True)  # always credit from CREDIT_SALE
+                sale_map[d.id] = sale_to_dict(d.id, data)
     except Exception:
         pass
 
