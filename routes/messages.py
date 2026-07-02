@@ -362,15 +362,13 @@ def send_message(group_id):
             return jsonify({"error": "question is required for poll messages"}), 400
         if not raw_options or not isinstance(raw_options, list) or len(raw_options) < 2:
             return jsonify({"error": "at least 2 options are required for poll messages"}), 400
-        poll_options = [
-            {"id": str(uuid.uuid4()), "text": str(opt), "votes": 0}
-            for opt in raw_options
-        ]
+        # Android-compatible structure (PollModel.java): options are plain
+        # strings; votes live in {votes: {index: count}, voters: {uid: index}}.
         poll_model = {
             "question": question,
-            "options": poll_options,
+            "options": [str(opt) for opt in raw_options],
             "senderId": uid,
-            "totalVotes": 0,
+            "votes": {"votes": {}, "voters": {}},
         }
         msg_data["isPoll"] = True
         msg_data["pollModel"] = poll_model
@@ -491,29 +489,38 @@ def vote_on_poll(group_id, message_id):
     poll_model = msg_data.get("pollModel") or {}
     options = poll_model.get("options", [])
 
-    # Find the option
-    option_found = False
-    for opt in options:
-        if opt.get("id") == option_id:
-            opt["votes"] = int(opt.get("votes", 0)) + 1
-            option_found = True
-        # Track voter ids per option to prevent double votes
-        voters = opt.get("voterIds", [])
+    if options and isinstance(options[0], str):
+        # ── Android structure: options are strings, optionId is the index ────
+        try:
+            idx = int(option_id)
+        except ValueError:
+            return jsonify({"error": "Option not found"}), 404
+        if idx < 0 or idx >= len(options):
+            return jsonify({"error": "Option not found"}), 404
+        votes_obj = poll_model.get("votes") or {}
+        counts = votes_obj.get("votes") or {}
+        voters = votes_obj.get("voters") or {}
         if uid in voters:
             return jsonify({"error": "You have already voted on this poll"}), 400
-
-    if not option_found:
-        return jsonify({"error": "Option not found"}), 404
-
-    # Mark uid as voter
-    for opt in options:
-        if opt.get("id") == option_id:
+        counts[str(idx)] = int(counts.get(str(idx), 0) or 0) + 1
+        voters[uid] = idx
+        poll_model["votes"] = {"votes": counts, "voters": voters}
+    else:
+        # ── Legacy structure: options are {id, text, votes} maps ────────────
+        option_found = False
+        for opt in options:
             voters = opt.get("voterIds", [])
-            voters.append(uid)
-            opt["voterIds"] = voters
-
-    poll_model["options"] = options
-    poll_model["totalVotes"] = int(poll_model.get("totalVotes", 0)) + 1
+            if uid in voters:
+                return jsonify({"error": "You have already voted on this poll"}), 400
+        for opt in options:
+            if opt.get("id") == option_id:
+                opt["votes"] = int(opt.get("votes", 0)) + 1
+                opt.setdefault("voterIds", []).append(uid)
+                option_found = True
+        if not option_found:
+            return jsonify({"error": "Option not found"}), 404
+        poll_model["options"] = options
+        poll_model["totalVotes"] = int(poll_model.get("totalVotes", 0)) + 1
 
     try:
         msg_ref.update({"pollModel": poll_model})
