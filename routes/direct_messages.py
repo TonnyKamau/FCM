@@ -263,6 +263,13 @@ def send_direct_message(other_user_id):
     sender_preview.update(extra_preview)
     receiver_preview.update(extra_preview)
 
+    # Never merge empty display fields over an existing preview — an empty
+    # name/image would turn the chat into "Unknown Chat" in the apps.
+    for preview in (sender_preview, receiver_preview):
+        for field in ("name", "image"):
+            if not preview.get(field):
+                preview.pop(field, None)
+
     try:
         (
             db.collection(C.USER_CHAT_PREVIEWS)

@@ -23,6 +23,12 @@ MESSAGES_SUBCOLLECTION = "MESSAGES"  # subcollection under CHATS/{chatId}
 GROUP_ACCOUNTS    = "GroupAccounts"
 GROUP_MEMBERS     = "GroupMembers"
 
+# Android canonical group structure (GroupStructureService.java):
+# GROUP_PROFILES/{groupId}                  — profile doc (name, image, adminID, flags)
+# GROUP_PROFILES/{groupId}/members/{userId} — member docs (status == "active")
+GROUP_PROFILES        = "GROUP_PROFILES"
+GP_MEMBERS            = "members"
+
 # ── Licensing ─────────────────────────────────────────────────────────────────
 LICENSES          = "LICENSES"
 

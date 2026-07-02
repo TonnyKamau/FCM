@@ -211,12 +211,9 @@ def _update_chat_previews(db, sender_uid, group_id, group_data, last_msg, now, e
 
     chat_preview_base = {
         "id":            group_id,
-        "name":          gd.get("name", ""),
-        "image":         gd.get("image", ""),
         "lastMessage":   last_msg,
         "timestamp":     now,
         "isGroup":       is_group,
-        "adminID":       admin_id,
         "userID":        sender_uid,
         "isMoneyShared": False,
         "isImageShared": False,
@@ -224,6 +221,14 @@ def _update_chat_previews(db, sender_uid, group_id, group_data, last_msg, now, e
         "whoShared":     "",
         "money":         "",
     }
+    # Only write display fields when we actually have them — merging an empty
+    # name/image over an existing preview turns the chat into "Unknown Chat".
+    if gd.get("name"):
+        chat_preview_base["name"] = gd["name"]
+    if gd.get("image"):
+        chat_preview_base["image"] = gd["image"]
+    if admin_id:
+        chat_preview_base["adminID"] = admin_id
     if extra_preview_fields:
         chat_preview_base.update(extra_preview_fields)
 

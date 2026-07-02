@@ -80,7 +80,11 @@ def group_to_dict(doc_id, d, members=None):
         "image": d.get("image", ""),
         "adminID":               d.get("admin_id", "")                    or d.get("adminID", ""),
         "isBusinessGroup":       d.get("is_business_group",   True)       if "is_business_group"   in d else d.get("isBusinessGroup",   True),
-        "isGroup":               d.get("is_group",            True)       if "is_group"            in d else d.get("isGroup",           True),
+        # When the flag is absent (legacy DM previews are written via update
+        # maps), infer: a chat with a userID and no members is a 1:1 DM.
+        "isGroup":               d.get("is_group")  if "is_group" in d
+                                 else d.get("isGroup") if "isGroup" in d
+                                 else not bool(d.get("userID", "")),
         "isMoneyShared":         d.get("is_money_shared",     False)      if "is_money_shared"     in d else d.get("isMoneyShared",     False),
         "restrictMoneyAfterLoanRequest":  d.get("restrict_money_after_loan",    False) if "restrict_money_after_loan"    in d else d.get("restrictMoneyAfterLoanRequest",  False),
         "requireAdminApprovalForLoans":   d.get("require_admin_approval_loans", False) if "require_admin_approval_loans" in d else d.get("requireAdminApprovalForLoans",   False),
@@ -195,13 +199,13 @@ def product_to_dict(doc_id, d):
 def stock_in_to_dict(doc_id, d):
     return {
         "id": doc_id,
-        "product_id": d.get("product_id", ""),
+        "product_id": d.get("product_id", "") or d.get("productId", ""),
         "name": d.get("name", ""),
         "measuring_unit": d.get("measuring_unit", "pcs"),
         "buying_price": d.get("buying_price", 0.0),
         "unit_price": d.get("unit_price", 0.0),
         "quantity": d.get("quantity", 0),
-        "unit": 1,
+        "unit": d.get("unit", 1) or 1,
         "sold_amount": d.get("sold_amount", 0.0),
         "total_available": d.get("total_available", 0),
         "date": d.get("date", _now_ms()),
@@ -231,7 +235,13 @@ def sale_to_dict(doc_id, d):
     unit_price     = float(d.get("unit_price", 0) or d.get("unitPrice", 0) or 0)
     buying_price   = float(d.get("buying_price", 0) or d.get("buyingPrice", 0) or 0)
     payment_status = d.get("payment_status", True) if "payment_status" in d else d.get("paymentStatus", True)
-    is_credit      = d.get("is_credit",    False) if "is_credit"    in d else d.get("isCredit",    False)
+    # Android canonical field (BusinessDataService.saleMap): saleType "cash"/"credit"
+    if d.get("saleType") in ("cash", "credit"):
+        is_credit = d["saleType"] == "credit"
+    elif d.get("sale_type") in ("cash", "credit"):
+        is_credit = d["sale_type"] == "credit"
+    else:
+        is_credit = d.get("is_credit", False) if "is_credit" in d else d.get("isCredit", False)
     return {
         "id":            doc_id,
         "product_id":    d.get("product_id", "") or d.get("productId", ""),
@@ -252,6 +262,12 @@ def sale_to_dict(doc_id, d):
 
 def customer_to_dict(doc_id, d):
     balance      = float(d.get("balance",      0)    or d.get("totalDebt",     0)    or 0)
+    # Android canonical debt fields (BusinessDataService): totalCredit / totalPaid
+    if not balance:
+        total_credit = float(d.get("totalCredit", 0) or 0)
+        total_paid   = float(d.get("totalPaid",   0) or 0)
+        if total_credit or total_paid:
+            balance = max(total_credit - total_paid, 0.0)
     credit_limit = float(d.get("credit_limit", 0)    or d.get("creditLimit",   0)    or 0)
     is_active    = d.get("is_active", True) if "is_active" in d else d.get("isActive", True)
     group_id     = d.get("group_id", "") or d.get("chatID", "")
@@ -280,13 +296,13 @@ def customer_to_dict(doc_id, d):
 def customer_payment_to_dict(doc_id, d):
     return {
         "id": doc_id,
-        "customerId": d.get("customer_id", ""),
-        "amount": d.get("amount", 0.0),
-        "method": d.get("method", "cash"),
+        "customerId": d.get("customer_id", "") or d.get("customerId", ""),
+        "amount": float(d.get("amount", 0) or 0),
+        "method": d.get("method", "") or d.get("paymentMethod", "") or "cash",
         "notes": d.get("notes", ""),
-        "createdBy": d.get("created_by", ""),
+        "createdBy": d.get("created_by", "") or d.get("createdBy", ""),
         "isAllocated": d.get("is_allocated", True),
-        "timestamp": d.get("timestamp", _now_ms()),
+        "timestamp": d.get("timestamp") or d.get("date") or _now_ms(),
     }
 
 

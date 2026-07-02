@@ -41,33 +41,117 @@ def _member_summary(user_id, role, user_data=None, fallback_email=""):
     }
 
 
-def _build_group(db, group_id):
-    """Fetch a group document and its members; returns group dict or None."""
-    doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
-    if not doc.exists:
+def _preview_group_data(db, user_id, group_id):
+    """Read a chat-preview doc for user_id/group_id.
+
+    Checks both the new structure (USER_CHAT_PREVIEWS subcollection) and the
+    legacy CHATS/{uid} map. Prefers whichever copy carries a groupMembers
+    array — the new-structure doc often only holds last-message metadata
+    while the legacy doc (written by Android) has the full member list."""
+    if not user_id:
         return None
-    gd = doc.to_dict()
+    candidate = None
+    try:
+        pdoc = (
+            db.collection(C.USER_CHAT_PREVIEWS)
+            .document(user_id)
+            .collection(C.CHATS_SUBCOLLECTION)
+            .document(group_id)
+            .get()
+        )
+        if pdoc.exists:
+            candidate = pdoc.to_dict() or {}
+            if candidate.get("groupMembers"):
+                return candidate
+    except Exception:
+        pass
+    try:
+        chats_doc = db.collection(C.CHATS).document(user_id).get()
+        if chats_doc.exists:
+            chat_group = (chats_doc.to_dict() or {}).get(group_id)
+            if isinstance(chat_group, dict):
+                if chat_group.get("groupMembers") or candidate is None:
+                    return chat_group
+    except Exception:
+        pass
+    return candidate
 
-    member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
-    members = [group_member_to_dict(md.to_dict()) for md in member_docs]
 
-    # Fallback: read members from legacy CHATS/{admin_id} map document
+def _preview_members(preview_data):
+    raw = (preview_data or {}).get("groupMembers", [])
+    if isinstance(raw, list):
+        return [group_member_from_chats(m) for m in raw if isinstance(m, dict)]
+    return []
+
+
+def _group_profile(db, group_id):
+    """Read the Android canonical structure: GROUP_PROFILES/{groupId} profile
+    doc and its active members subcollection. Returns (profile|None, members)."""
+    profile = None
+    members = []
+    try:
+        pdoc = db.collection(C.GROUP_PROFILES).document(group_id).get()
+        if pdoc.exists:
+            profile = pdoc.to_dict() or {}
+    except Exception:
+        pass
+    try:
+        mdocs = (
+            db.collection(C.GROUP_PROFILES)
+            .document(group_id)
+            .collection(C.GP_MEMBERS)
+            .where("status", "==", "active")
+            .get()
+        )
+        for md in mdocs:
+            d = md.to_dict() or {}
+            image = d.get("image", "")
+            members.append({
+                "id":       d.get("userId", "") or md.id,
+                "name":     d.get("name", ""),
+                "email":    d.get("email", ""),
+                "phoneNum": d.get("phoneNum", ""),
+                "image":    image,
+                "photoUrl": image,
+                "role":     d.get("role", "") or "UNKNOWN_ROLE",
+            })
+    except Exception:
+        pass
+    return profile, members
+
+
+def _build_group(db, group_id, uid=None):
+    """Fetch a group and its members.
+
+    Source priority (mirrors the Android app):
+      1. GROUP_PROFILES/{gid} + members subcollection  — canonical new structure
+      2. GroupAccounts + GroupMembers                  — backend-created groups
+      3. Chat-preview docs                             — legacy fallback
+    """
+    profile, members = _group_profile(db, group_id)
+
+    doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    gd = doc.to_dict() if doc.exists else None
+
+    group_data = profile if profile else gd
+    if group_data is None:
+        group_data = _preview_group_data(db, uid, group_id)
+        if group_data is None:
+            return None
+
+    if not members and gd is not None:
+        member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
+        members = [group_member_to_dict(md.to_dict()) for md in member_docs]
+
+    # Legacy fallbacks: caller's preview doc, then the admin's preview doc.
     if not members:
-        admin_id = gd.get("admin_id", "")
-        if admin_id:
-            try:
-                chats_doc = db.collection(C.CHATS).document(admin_id).get()
-                if chats_doc.exists:
-                    chat_data = chats_doc.to_dict() or {}
-                    chat_group = chat_data.get(group_id, {})
-                    if isinstance(chat_group, dict):
-                        raw_members = chat_group.get("groupMembers", [])
-                        if isinstance(raw_members, list):
-                            members = [group_member_from_chats(m) for m in raw_members if isinstance(m, dict)]
-            except Exception:
-                pass
+        members = _preview_members(_preview_group_data(db, uid, group_id))
+    if not members:
+        admin_id = group_data.get("adminID", "") or group_data.get("admin_id", "")
+        if admin_id and admin_id != uid:
+            members = _preview_members(_preview_group_data(db, admin_id, group_id))
 
-    return group_to_dict(doc.id, gd, members)
+    return group_to_dict(group_id, group_data, members or None)
 
 
 @groups_bp.route("", methods=["GET"])
@@ -218,14 +302,15 @@ def create_group():
                 invalidate_user_payload("groups", user_docs[0].id)
                 invalidate_user_payload("groups_canonical", user_docs[0].id)
 
-    return jsonify({"group": _build_group(db, group_id)}), 201
+    return jsonify({"group": _build_group(db, group_id, uid)}), 201
 
 
 @groups_bp.route("/<group_id>", methods=["GET"])
 @require_auth
 def get_group(group_id):
+    uid = get_jwt_identity()
     db = get_db()
-    g_dict = _build_group(db, group_id)
+    g_dict = _build_group(db, group_id, uid)
     if not g_dict:
         return jsonify({"error": "Group not found"}), 404
     return jsonify({"group": g_dict})
@@ -264,7 +349,7 @@ def assign_role(group_id, member_id):
     invalidate_user_payload("groups_canonical", uid)
     invalidate_user_payload("groups", member_id)
     invalidate_user_payload("groups_canonical", member_id)
-    return jsonify({"group": _build_group(db, group_id)})
+    return jsonify({"group": _build_group(db, group_id, uid)})
 
 
 # ─── Member management ──────────────────────────────────────────────────────────
@@ -408,7 +493,7 @@ def add_member(group_id):
     invalidate_user_payload("groups", new_uid)
     invalidate_user_payload("groups_canonical", new_uid)
 
-    return jsonify({"group": _build_group(db, group_id)}), 201
+    return jsonify({"group": _build_group(db, group_id, uid)}), 201
 
 
 @groups_bp.route("/<group_id>/members/<member_id>", methods=["DELETE"])
@@ -462,7 +547,7 @@ def remove_member(group_id, member_id):
     invalidate_user_payload("groups", uid)
     invalidate_user_payload("groups_canonical", uid)
 
-    return jsonify({"group": _build_group(db, group_id)})
+    return jsonify({"group": _build_group(db, group_id, uid)})
 
 
 # ─── Group settings ───────────────────────────────────────────────────────────
@@ -564,4 +649,4 @@ def update_settings(group_id):
     invalidate_user_payload("groups", uid)
     invalidate_user_payload("groups_canonical", uid)
 
-    return jsonify({"group": _build_group(db, group_id)})
+    return jsonify({"group": _build_group(db, group_id, uid)})

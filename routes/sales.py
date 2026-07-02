@@ -155,14 +155,46 @@ def _post_sale_notification(db, uid, group_id, description, total, now):
         group_doc  = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
         group_info = group_doc.to_dict() if group_doc.exists else {}
 
+        # Android canonical structure: GROUP_PROFILES/{groupId}
+        if not group_info.get("name"):
+            try:
+                profile_doc = db.collection(C.GROUP_PROFILES).document(group_id).get()
+                if profile_doc.exists:
+                    pd = profile_doc.to_dict() or {}
+                    if pd.get("name"):
+                        group_info = {
+                            "name":     pd.get("name", ""),
+                            "image":    pd.get("image", ""),
+                            "admin_id": pd.get("adminID", ""),
+                        }
+            except Exception:
+                pass
+
+        # Last resort — the sender's own chat preview for the display fields.
+        if not group_info.get("name"):
+            try:
+                sender_preview = (
+                    db.collection(C.USER_CHAT_PREVIEWS)
+                    .document(uid)
+                    .collection(C.CHATS_SUBCOLLECTION)
+                    .document(group_id)
+                    .get()
+                )
+                if sender_preview.exists:
+                    pd = sender_preview.to_dict() or {}
+                    group_info = {
+                        "name":     pd.get("name", ""),
+                        "image":    pd.get("image", ""),
+                        "admin_id": pd.get("adminID", "") or pd.get("admin_id", ""),
+                    }
+            except Exception:
+                pass
+
         chat_preview_base = {
             "id":            group_id,
-            "name":          group_info.get("name", ""),
-            "image":         group_info.get("image", ""),
             "lastMessage":   last_msg,
             "timestamp":     now,
             "isGroup":       True,
-            "adminID":       group_info.get("admin_id", ""),
             "userID":        uid,
             "isMoneyShared": False,
             "isImageShared": False,
@@ -170,6 +202,14 @@ def _post_sale_notification(db, uid, group_id, description, total, now):
             "whoShared":     sender_name,
             "money":         "",
         }
+        # Never merge empty display fields over existing preview data —
+        # that is what turns a named group into "Unknown Chat".
+        if group_info.get("name"):
+            chat_preview_base["name"] = group_info["name"]
+        if group_info.get("image"):
+            chat_preview_base["image"] = group_info["image"]
+        if group_info.get("admin_id"):
+            chat_preview_base["adminID"] = group_info["admin_id"]
         for member_uid in all_member_ids:
             preview_ref = (
                 db.collection(C.USER_CHAT_PREVIEWS)
