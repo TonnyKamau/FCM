@@ -63,14 +63,35 @@ def sales_report(group_id):
     if cached_payload is not None:
         return jsonify(cached_payload)
 
+    cash_map = {}
+    credit_map = {}
+
+    # ── Source 0: Android canonical — BUSINESS_DATA/{groupId}/sales ──────────
+    # saleType field is "cash" or "credit" (BusinessDataService.saleMap).
+    try:
+        bd_docs = (
+            db.collection(C.BUSINESS_DATA)
+            .document(group_id)
+            .collection(C.BD_SALES)
+            .get()
+        )
+        for d in bd_docs:
+            s = sale_to_dict(d.id, d.to_dict() or {})
+            (credit_map if s["isCredit"] else cash_map)[d.id] = s
+    except Exception as e:
+        import logging
+        logging.exception("sales_report BUSINESS_DATA error (%s): %s", group_id, e)
+
     cash_docs   = db.collection(C.CASH_SALE  ).where("group_id", "==", group_id).get()
     credit_docs = db.collection(C.CREDIT_SALE).where("group_id", "==", group_id).get()
-    cash_map = {d.id: sale_to_dict(d.id, d.to_dict()) for d in cash_docs}
-    credit_map = {}
+    for d in cash_docs:
+        if d.id not in cash_map and d.id not in credit_map:
+            cash_map[d.id] = sale_to_dict(d.id, d.to_dict())
     for d in credit_docs:
-        data = d.to_dict() or {}
-        data.setdefault('is_credit', True)
-        credit_map[d.id] = sale_to_dict(d.id, data)
+        if d.id not in cash_map and d.id not in credit_map:
+            data = d.to_dict() or {}
+            data.setdefault('is_credit', True)
+            credit_map[d.id] = sale_to_dict(d.id, data)
 
     # â”€â”€ Source 2: original project â€” nested subcollection structure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # IMPORTANT: use list_documents() NOT stream() for the product-name level.
@@ -121,10 +142,37 @@ def stock_report(group_id):
     if cached_payload is not None:
         return jsonify(cached_payload)
 
+    in_map  = {}
+    out_map = {}
+
+    # ── Source 0: Android canonical — BUSINESS_DATA/{groupId}/stock_movements ─
+    # movementType field is "in" or "out" (BusinessDataService.stockMap).
+    try:
+        bd_docs = (
+            db.collection(C.BUSINESS_DATA)
+            .document(group_id)
+            .collection(C.BD_STOCK_MOVEMENTS)
+            .get()
+        )
+        for d in bd_docs:
+            dd = d.to_dict() or {}
+            mt = dd.get("movementType") or dd.get("movement_type") or "in"
+            if mt == "out":
+                out_map[d.id] = stock_out_to_dict(d.id, dd)
+            else:
+                in_map[d.id] = stock_in_to_dict(d.id, dd)
+    except Exception as e:
+        import logging
+        logging.exception("stock_report BUSINESS_DATA error (%s): %s", group_id, e)
+
     stock_in_docs  = db.collection(C.STOCK    ).where("group_id", "==", group_id).get()
     stock_out_docs = db.collection(C.STOCK_OUT).where("group_id", "==", group_id).get()
-    in_map  = {d.id: stock_in_to_dict (d.id, d.to_dict()) for d in stock_in_docs}
-    out_map = {d.id: stock_out_to_dict(d.id, d.to_dict()) for d in stock_out_docs}
+    for d in stock_in_docs:
+        if d.id not in in_map:
+            in_map[d.id] = stock_in_to_dict(d.id, d.to_dict())
+    for d in stock_out_docs:
+        if d.id not in out_map:
+            out_map[d.id] = stock_out_to_dict(d.id, d.to_dict())
 
     if not canonical_only:
         # â”€â”€ Source 2a: Windows Flutter â€” STOCK/{groupId} map document â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

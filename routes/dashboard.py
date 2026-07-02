@@ -169,11 +169,12 @@ def _fetch_customer_stats(db, group_id):
     except Exception:
         pass
 
-    outstanding = sum(
-        float(c.get("balance") or c.get("totalDebt") or 0.0)
-        for c in cust_map.values()
-        if float(c.get("balance") or c.get("totalDebt") or 0.0) > 0
-    )
+    outstanding = 0.0
+    for cid, c in cust_map.items():
+        # customer_to_dict derives debt from Android's totalCredit/totalPaid too
+        balance = customer_to_dict(cid, c)["balance"]
+        if balance > 0:
+            outstanding += balance
     return len(cust_map), outstanding
 
 

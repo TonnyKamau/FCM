@@ -21,10 +21,21 @@ from datetime import datetime, timezone
 from cache_utils import cached_is_member, get_cached_group_payload, set_cached_group_payload, invalidate_group_payload
 
 # ── Firestore collection names ────────────────────────────────────────────────
-_EXPENSES       = "EXPENSES"
-_GROUP_ACCOUNTS = "GroupAccounts"
-_GROUP_MEMBERS  = "GroupMembers"
-_CHATS          = "CHATS"
+_EXPENSES        = "EXPENSES"
+_GROUP_ACCOUNTS  = "GroupAccounts"
+_GROUP_MEMBERS   = "GroupMembers"
+_CHATS           = "CHATS"
+_BUSINESS_DATA   = "BUSINESS_DATA"
+_LEDGER_ENTRIES  = "ledger_entries"  # Android canonical (BusinessDataService)
+
+
+def _ledger_ref(db, group_id):
+    """BUSINESS_DATA/{groupId}/ledger_entries — Android canonical ledger."""
+    return (
+        db.collection(_BUSINESS_DATA)
+        .document(group_id)
+        .collection(_LEDGER_ENTRIES)
+    )
 
 # ── Blueprints ────────────────────────────────────────────────────────────────
 expenses_bp = Blueprint("expenses", __name__, url_prefix="/groups/<group_id>/expenses")
@@ -123,6 +134,17 @@ def _list(group_id, is_expense_flag):
     if cached_payload is not None:
         return jsonify(cached_payload)
 
+    entry_map = {}
+
+    # Source 0: Android canonical — BUSINESS_DATA/{groupId}/ledger_entries
+    # entryType is "expense" or "income" (BusinessDataService.saveLedgerEntry).
+    try:
+        entry_type = "expense" if is_expense_flag else "income"
+        for d in _ledger_ref(db, group_id).where("entryType", "==", entry_type).get():
+            entry_map[d.id] = _to_dict(d.id, d.to_dict() or {})
+    except Exception:
+        pass
+
     # Source 1: flat EXPENSES collection
     docs = (
         db.collection(_EXPENSES)
@@ -130,7 +152,9 @@ def _list(group_id, is_expense_flag):
         .where("is_expense", "==", is_expense_flag)
         .get()
     )
-    entry_map = {d.id: _to_dict(d.id, d.to_dict()) for d in docs}
+    for d in docs:
+        if d.id not in entry_map:
+            entry_map[d.id] = _to_dict(d.id, d.to_dict())
 
     # Source 2: original kitifms — EXPENSES/{adminId} single map document
     if admin_id:
@@ -185,6 +209,19 @@ def _create(group_id, is_expense_flag):
         "created_at":     datetime.now(timezone.utc).isoformat(),
     }
     db.collection(_EXPENSES).document(entry_id).set(entry_data)
+
+    # Mirror to Android canonical ledger so the Android app sees the entry.
+    try:
+        ledger_data = dict(entry_data)
+        ledger_data["id"] = entry_id
+        ledger_data["groupId"] = group_id
+        ledger_data["chatID"] = group_id
+        ledger_data["isExpense"] = is_expense_flag
+        ledger_data["entryType"] = "expense" if is_expense_flag else "income"
+        _ledger_ref(db, group_id).document(entry_id).set(ledger_data, merge=True)
+    except Exception:
+        pass
+
     base_cache_name = "expenses" if is_expense_flag else "income"
     invalidate_group_payload(base_cache_name, group_id)
     invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
@@ -201,10 +238,18 @@ def _update(group_id, entry_id, is_expense_flag):
 
     doc = db.collection(_EXPENSES).document(entry_id).get()
     if not doc.exists:
-        return jsonify({"error": "Entry not found"}), 404
-    d = doc.to_dict()
-    if d.get("group_id") != group_id or d.get("is_expense") != is_expense_flag:
-        return jsonify({"error": "Entry not found"}), 404
+        # Android-created entry — only in the canonical ledger.
+        doc = _ledger_ref(db, group_id).document(entry_id).get()
+        if not doc.exists:
+            return jsonify({"error": "Entry not found"}), 404
+        d = doc.to_dict() or {}
+        entry_type = "expense" if is_expense_flag else "income"
+        if d.get("entryType") != entry_type:
+            return jsonify({"error": "Entry not found"}), 404
+    else:
+        d = doc.to_dict()
+        if d.get("group_id") != group_id or d.get("is_expense") != is_expense_flag:
+            return jsonify({"error": "Entry not found"}), 404
 
     data    = request.get_json() or {}
     updates = {}
@@ -217,10 +262,16 @@ def _update(group_id, entry_id, is_expense_flag):
     if "payment_method" in data: updates["payment_method"] = data["payment_method"]
     doc.reference.update(updates)
 
+    # Mirror the update to the Android canonical ledger.
+    try:
+        _ledger_ref(db, group_id).document(entry_id).set(updates, merge=True)
+    except Exception:
+        pass
+
     base_cache_name = "expenses" if is_expense_flag else "income"
     invalidate_group_payload(base_cache_name, group_id)
     invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
-    updated = db.collection(_EXPENSES).document(entry_id).get()
+    updated = doc.reference.get()
     key = "expense" if is_expense_flag else "income"
     return jsonify({key: _to_dict(updated.id, updated.to_dict())})
 
@@ -232,14 +283,26 @@ def _delete(group_id, entry_id, is_expense_flag):
     if not is_mem:
         return jsonify({"error": "Access denied"}), 403
 
+    found = False
     doc = db.collection(_EXPENSES).document(entry_id).get()
-    if not doc.exists:
-        return jsonify({"error": "Entry not found"}), 404
-    d = doc.to_dict()
-    if d.get("group_id") != group_id or d.get("is_expense") != is_expense_flag:
-        return jsonify({"error": "Entry not found"}), 404
+    if doc.exists:
+        d = doc.to_dict()
+        if d.get("group_id") != group_id or d.get("is_expense") != is_expense_flag:
+            return jsonify({"error": "Entry not found"}), 404
+        doc.reference.delete()
+        found = True
 
-    doc.reference.delete()
+    # Delete from the Android canonical ledger too.
+    try:
+        ledger_doc = _ledger_ref(db, group_id).document(entry_id).get()
+        if ledger_doc.exists:
+            ledger_doc.reference.delete()
+            found = True
+    except Exception:
+        pass
+
+    if not found:
+        return jsonify({"error": "Entry not found"}), 404
     base_cache_name = "expenses" if is_expense_flag else "income"
     invalidate_group_payload(base_cache_name, group_id)
     invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
