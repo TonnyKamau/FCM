@@ -57,13 +57,24 @@ def _to_dict(doc_id, d):
     is_expense = d.get("is_expense", True) if "is_expense" in d else d.get("isExpense", True)
     group_id   = d.get("group_id", "") or d.get("chatID", "")
     pay_method = d.get("payment_method", "") or d.get("paymentMethod", "") or "cash"
+    name = d.get("name", "")
+    normalized_name = str(name).strip().lower()
+    is_sales_income = (not is_expense) and (
+        bool(d.get("isSalesIncome", False))
+        or normalized_name.startswith("multiple products sold")
+        or normalized_name.startswith("multi-product sale")
+        or normalized_name.startswith("sold ")
+        or " is sold " in normalized_name
+    )
     return {
         "id":            doc_id,
         "chatID":        group_id,
-        "name":          d.get("name", ""),
+        "name":          name,
         "price":         float(d.get("price", 0) or 0),
         "isExpense":     is_expense,
         "category":      d.get("category", "Other"),
+        "source":        "Sales" if is_sales_income else d.get("source", d.get("category", "Other")),
+        "isSalesIncome": is_sales_income,
         "paymentMethod": pay_method,
         "notes":         d.get("notes", ""),
         "createdBy":     d.get("created_by", "") or d.get("createdBy", ""),

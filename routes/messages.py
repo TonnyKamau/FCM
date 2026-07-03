@@ -121,6 +121,14 @@ def upload_message_media(group_id):
     if uploaded is None or not uploaded.filename:
         return jsonify({"error": "file is required"}), 400
     content_type = (uploaded.mimetype or "").lower()
+    if content_type in {"", "application/octet-stream"}:
+        extension = uploaded.filename.rsplit(".", 1)[-1].lower() if "." in uploaded.filename else ""
+        content_type = {
+            "m4a": "audio/mp4", "aac": "audio/aac", "mp3": "audio/mpeg",
+            "ogg": "audio/ogg", "wav": "audio/wav",
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "webp": "image/webp",
+        }.get(extension, content_type)
     if content_type not in _ALLOWED_MEDIA_TYPES:
         return jsonify({"error": "Unsupported media type"}), 415
 
