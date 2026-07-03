@@ -159,10 +159,15 @@ def message_to_dict(doc_id, d):
         "isExtensionRequest":          bool(d.get("isExtensionRequest", False)),
         "isReviewRequest":             bool(d.get("isReviewRequest", False)),
         "isGuarantorInvitation":       bool(d.get("isGuarantorInvitation", False)),
+        "guarantorInvitationId":        d.get("guarantorInvitationId", ""),
+        "invitationType":               d.get("invitationType", ""),
+        "requestedGuarantorId":         d.get("requestedGuarantorId", ""),
         "requestedGuarantorName":      d.get("requestedGuarantorName", ""),
         "isGuarantorNotification":     bool(d.get("isGuarantorNotification", False)),
         "isLoanApprovalRequest":       bool(d.get("isLoanApprovalRequest", False)),
+        "loanApprovalRequestId":        d.get("loanApprovalRequestId", ""),
         "isMemberWithdrawalRequest":   bool(d.get("isMemberWithdrawalRequest", False)),
+        "memberWithdrawalRequestId":    d.get("memberWithdrawalRequestId", ""),
         "memberWithdrawalStatus":      d.get("memberWithdrawalStatus", ""),
         "memberWithdrawalAmount":      float(d.get("memberWithdrawalAmount", 0) or 0),
         "memberWithdrawalMemberName":  d.get("memberWithdrawalMemberName", ""),
@@ -177,6 +182,7 @@ def message_to_dict(doc_id, d):
         "replyToMessageId":   d.get("replyToMessageId", ""),
         "replyToSenderName":  d.get("replyToSenderName", ""),
         "replyToText":        d.get("replyToText", ""),
+        "actionStatus":       d.get("actionStatus", ""),
     }
 
 
@@ -366,5 +372,4 @@ def license_to_dict(doc_id, d):
         "recipientEmail": d.get("recipient_email", "")  or d.get("recipientEmail", ""),
         "usedAt":         d.get("used_at",       "")   or d.get("usedAt",       ""),
     }
-
 
