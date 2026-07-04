@@ -8,11 +8,11 @@ from google.cloud.firestore_v1 import ArrayUnion, ArrayRemove
 from firebase_utils import get_db
 from models import message_to_dict
 from auth_utils import require_auth, get_jwt_identity
+from config import MEDIA_UPLOAD_API_KEY
 from google.cloud.firestore import Increment
 import db_constants as C
 import uuid
 from datetime import datetime, timezone
-from config import API_KEY
 
 messages_bp = Blueprint("messages", __name__, url_prefix="/groups/<group_id>/messages")
 
@@ -142,15 +142,28 @@ def upload_message_media(group_id):
     try:
         upstream = requests.post(
             _MEDIA_UPLOAD_URL,
-            headers={"X-API-KEY": API_KEY, "Accept": "application/json"},
+            headers={
+                "X-API-KEY": MEDIA_UPLOAD_API_KEY,
+                "Accept": "application/json",
+                # The media server's mod_security blocks the default
+                # python-requests user agent; mimic the Android client.
+                "User-Agent": "okhttp/4.12.0",
+            },
             files={"image": (uploaded.filename, payload, content_type)},
             data={"upload_type": upload_type, "associated_id": group_id},
             timeout=180,
         )
-        data = upstream.json()
     except Exception as exc:
         logging.exception("Media upload failed for %s: %s", group_id, exc)
         return jsonify({"error": "Media upload service unavailable"}), 502
+    try:
+        data = upstream.json()
+    except ValueError:
+        logging.error(
+            "Media server returned non-JSON (%s): %s",
+            upstream.status_code, upstream.text[:300],
+        )
+        return jsonify({"error": f"Media server error ({upstream.status_code})"}), 502
     if not upstream.ok or data.get("success") is not True:
         return jsonify({"error": data.get("error", "Media upload failed")}), 502
     url = str(data.get("url", ""))
