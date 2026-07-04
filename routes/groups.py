@@ -255,9 +255,13 @@ def create_group():
     group_id = str(uuid.uuid4())
     now = _now_ms()
 
+    image_value = data.get("image", "")
+    if image_value and not str(image_value).startswith(("http://", "https://")):
+        return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
+
     group_data = {
         "name": name,
-        "image": data.get("image", ""),
+        "image": image_value,
         "admin_id": uid,
         "is_business_group": data.get("isBusinessGroup", True),
         "is_group": data.get("isGroup", True),
@@ -616,6 +620,10 @@ def update_settings(group_id):
 
     if not updates:
         return jsonify({"error": "No valid settings fields provided"}), 400
+
+    image_value = updates.get("image")
+    if image_value not in (None, "") and not str(image_value).startswith(("http://", "https://")):
+        return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
 
     try:
         db.collection(C.GROUP_ACCOUNTS).document(group_id).update(updates)

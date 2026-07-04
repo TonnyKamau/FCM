@@ -56,6 +56,10 @@ def update_user(uid):
         if req_key in data:
             updates[db_key] = data[req_key]
 
+    image_value = updates.get("image_url")
+    if image_value not in (None, "") and not str(image_value).startswith(("http://", "https://")):
+        return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
+
     doc.reference.update(updates)
     updated = db.collection(C.USERS).document(uid).get()
     return jsonify({"user": user_to_dict(updated.id, updated.to_dict())})

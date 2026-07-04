@@ -14,6 +14,14 @@ from cache_utils import (
 products_bp = Blueprint("products", __name__, url_prefix="/groups/<group_id>/products")
 
 
+def _valid_image_value(value):
+    """Only http(s) URLs (or empty to clear) — Android's Glide loaders reject
+    base64/local paths, so persisting them would break cross-platform display."""
+    return value == "" or str(value).startswith(("http://", "https://"))
+
+
+
+
 def _is_true(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -179,6 +187,9 @@ def create_product(group_id):
     if not name:
         return jsonify({"error": "name is required"}), 400
 
+    if not _valid_image_value(data.get("image", "")):
+        return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
+
     product_id = data.get("id") or str(uuid.uuid4())
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     product_data = {
@@ -270,6 +281,10 @@ def update_product(group_id, product_id):
     ]:
         if req_key in data:
             updates[db_key] = data[req_key]
+
+    image_value = updates.get("image")
+    if image_value not in (None, "") and not str(image_value).startswith(("http://", "https://")):
+        return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
     for req_key, db_key in [
         ("buying_price", "buying_price"), ("unit_price", "unit_price"),
         ("wholesale_price", "wholesale_price"), ("wholesalePrice", "wholesale_price"),
