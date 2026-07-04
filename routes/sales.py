@@ -164,33 +164,131 @@ def _invalidate_sales_caches(group_id):
     invalidate_report("sales_canonical", group_id)
 
 
-def _post_sale_notification(db, uid, group_id, description, total, now):
-    """Fire-and-forget: post a chat message and update previews after a sale."""
+def _hydrate_remaining_stock(db, group_id, items):
+    """Fill stock-card balances when a caller did not provide them."""
+    for item in items:
+        if item.get("remainingStock") is not None:
+            continue
+        product_id = str(item.get("productId", "")).strip()
+        if not product_id:
+            item["remainingStock"] = 0
+            continue
+        product_doc = (
+            db.collection(C.BUSINESS_DATA)
+            .document(group_id)
+            .collection(C.BD_PRODUCTS)
+            .document(product_id)
+            .get()
+        )
+        if not product_doc.exists:
+            product_doc = db.collection(C.PRODUCTS).document(product_id).get()
+        item["remainingStock"] = (
+            (product_doc.to_dict() or {}).get("available_stock", 0)
+            if product_doc.exists else 0
+        )
+
+
+def _post_sale_notification(
+    db, uid, group_id, description, total, now, items, is_credit=False,
+    person_name="",
+):
+    """Post Android-compatible sale and stock-card messages, then update previews."""
     try:
+        _hydrate_remaining_stock(db, group_id, items)
         user_doc = db.collection(C.USERS).document(uid).get()
-        sender_name = user_doc.to_dict().get("name", "User") if user_doc.exists else "User"
+        user_data = user_doc.to_dict() or {} if user_doc.exists else {}
+        sender_name = user_data.get("name", "User")
+        sender_image = user_data.get("image", "")
 
-        msg_id   = str(uuid.uuid4())
-        msg_text = description
+        payment_text = (
+            f"by credit to {person_name}" if is_credit and person_name
+            else "by credit" if is_credit
+            else "by cash 💵"
+        )
+        if len(items) == 1:
+            item = items[0]
+            item_total = (
+                float(item.get("unitPrice", 0) or 0)
+                * int(item.get("quantity", 1) or 1)
+            )
+            msg_text = (
+                f"{item.get('productName', '')} worth KES{item_total:.2f} "
+                f"sold {payment_text}"
+            )
+        else:
+            sold_items = []
+            for item in items:
+                item_total = (
+                    float(item.get("unitPrice", 0) or 0)
+                    * int(item.get("quantity", 1) or 1)
+                )
+                sold_items.append(
+                    f"{item.get('productName', '')} "
+                    f"x{int(item.get('quantity', 1) or 1)} KES{item_total:.2f}"
+                )
+            msg_text = f"{', '.join(sold_items)} were sold {payment_text}"
 
-        db.collection(C.CHATS).document(group_id).collection(C.MESSAGES_SUBCOLLECTION).document(msg_id).set({
+        msg_id = str(uuid.uuid4())
+        messages_ref = (
+            db.collection(C.MESSAGES)
+            .document(group_id)
+            .collection("messages")
+        )
+        message_base = {
             "id":            msg_id,
             "senderID":      uid,
             "senderName":    sender_name,
-            "receiverID":    "",
-            "receiverName":  "",
             "chatID":        group_id,
             "message":       msg_text,
             "isGroup":       True,
             "isMoneyShared": False,
             "isImageShared": False,
-            "isPoll":        False,
-            "isLoanRequest": False,
             "money":         "",
-            "image":         "",
-            "caption":       "",
+            "image":         sender_image,
             "timestamp":     now,
+        }
+        messages_ref.document(msg_id).set(message_base)
+
+        if len(items) == 1:
+            item = items[0]
+            stock_text = (
+                "📊 STOCK CARD\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{'Product':<20} | {item.get('productName', '')}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{'Sold':<20} | {int(item.get('quantity', 1) or 1)} units\n"
+                f"{'Closing Balance':<20} | "
+                f"{float(item.get('remainingStock', 0) or 0):.0f} units\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+        else:
+            rows = [
+                "📊 STOCK CARD - MULTIPLE PRODUCTS",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"{'Product':<20} | {'Sold':<12} | {'Balance':<12}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            ]
+            for item in items:
+                product_name = str(item.get("productName", ""))
+                if len(product_name) > 20:
+                    product_name = f"{product_name[:17]}..."
+                rows.append(
+                    f"{product_name:<20} | "
+                    f"{int(item.get('quantity', 1) or 1):<12} | "
+                    f"{float(item.get('remainingStock', 0) or 0):<12.0f}"
+                )
+            rows.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            stock_text = "\n".join(rows)
+
+        stock_msg_id = str(uuid.uuid4())
+        stock_message = dict(message_base)
+        stock_message.update({
+            "id": stock_msg_id,
+            "senderName": "Stock Update",
+            "message": stock_text,
+            "timestamp": now + 1000,
         })
+        messages_ref.document(stock_msg_id).set(stock_message)
 
         last_msg = f"{sender_name}: {msg_text}"
         try:
@@ -207,6 +305,21 @@ def _post_sale_notification(db, uid, group_id, description, total, now):
             mid = gm.to_dict().get("user_id", "")
             if mid:
                 all_member_ids.add(mid)
+        try:
+            profile_members = (
+                db.collection(C.GROUP_PROFILES)
+                .document(group_id)
+                .collection(C.GP_MEMBERS)
+                .get()
+            )
+            for member in profile_members:
+                member_data = member.to_dict() or {}
+                if member_data.get("status", "active") == "active":
+                    all_member_ids.add(
+                        str(member_data.get("userId") or member.id)
+                    )
+        except Exception:
+            pass
 
         group_doc  = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
         group_info = group_doc.to_dict() if group_doc.exists else {}
@@ -276,8 +389,12 @@ def _post_sale_notification(db, uid, group_id, description, total, now):
             preview_data = dict(chat_preview_base)
             preview_data["unreadCount"] = 0 if member_uid == uid else Increment(1)
             preview_ref.set(preview_data, merge=True)
-    except Exception:
-        pass  # notification failure must never block the sale response
+    except Exception as exc:
+        logging.exception(
+            "Failed to post sale/stock chat cards for group %s: %s",
+            group_id,
+            exc,
+        )
 
 
 def _build_stock_card(db, group_id, items, now):
@@ -722,7 +839,9 @@ def create_sale(group_id):
         except Exception:
             pass
 
-    _post_sale_notification(db, uid, group_id, description, total, now)
+    _post_sale_notification(
+        db, uid, group_id, description, total, now, items, is_credit, person_name
+    )
 
     return jsonify({"sales": created_sales}), 201
 
@@ -931,7 +1050,9 @@ def create_multi_sale(group_id):
     invalidate_products(group_id)
     invalidate_group_payload("products_canonical", group_id)
 
-    _post_sale_notification(db, uid, group_id, description, total, now)
+    _post_sale_notification(
+        db, uid, group_id, description, total, now, items, is_credit, person_name
+    )
 
     return jsonify({"sales": created_sales, "total": total}), 201
 

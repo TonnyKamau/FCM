@@ -77,12 +77,21 @@ def _is_true(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _message_collections(db, group_id):
-    """All live message paths used by the backend and Android app."""
-    return [
-        db.collection(C.CHATS).document(group_id).collection(C.MESSAGES_SUBCOLLECTION),
-        db.collection("MESSAGES").document(group_id).collection("messages"),
-    ]
+def _canonical_message_collection(db, group_id):
+    """Android canonical path: MESSAGES/{groupId}/messages."""
+    return db.collection(C.MESSAGES).document(group_id).collection("messages")
+
+
+def _message_collections(db, group_id, include_legacy=True):
+    """Canonical messages, plus the old backend path when migration reads need it."""
+    collections = [_canonical_message_collection(db, group_id)]
+    if include_legacy:
+        collections.append(
+            db.collection(C.CHATS)
+            .document(group_id)
+            .collection(C.MESSAGES_SUBCOLLECTION)
+        )
+    return collections
 
 
 def _message_refs(db, group_id, message_id):
@@ -215,7 +224,11 @@ def loan_message_action(group_id, message_id):
             "isGroup": True, "isLoanRequest": True,
             "loanRequestModel": loan_data, "timestamp": now,
         }
-        for collection in _message_collections(db, group_id):
+        for collection in _message_collections(
+            db,
+            group_id,
+            include_legacy=False,
+        ):
             batch.set(collection.document(approved_id), approved, merge=True)
     batch.commit()
     return jsonify({"status": desired})
@@ -317,7 +330,11 @@ def list_messages(group_id):
     include_legacy = _is_true(request.args.get("includeLegacy")) and not since and not canonical_only
 
     msg_map = {}
-    for base_query in _message_collections(db, group_id):
+    for base_query in _message_collections(
+        db,
+        group_id,
+        include_legacy=not canonical_only,
+    ):
         try:
             reverse_after_fetch = False
             if since:
@@ -400,6 +417,19 @@ def _get_group_members(db, group_id, group_data):
                     mid = member.get("id") or member.get("uid", "")
                     if mid:
                         all_member_ids.add(mid)
+    except Exception:
+        pass
+    try:
+        member_docs = (
+            db.collection(C.GROUP_PROFILES)
+            .document(group_id)
+            .collection(C.GP_MEMBERS)
+            .get()
+        )
+        for member in member_docs:
+            data = member.to_dict() or {}
+            if data.get("status", "active") == "active":
+                all_member_ids.add(str(data.get("userId") or member.id))
     except Exception:
         pass
     return all_member_ids
@@ -499,12 +529,14 @@ def send_message(group_id):
     msg_type = data.get("type", "text").lower()
 
     user_doc = db.collection(C.USERS).document(uid).get()
-    sender_name = user_doc.to_dict().get("name", "User") if user_doc.exists else "User"
+    user_data = user_doc.to_dict() or {} if user_doc.exists else {}
+    sender_name = user_data.get("name", "User")
     is_group = _is_group_flag(group_data)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     msg_id = str(uuid.uuid4())
 
     msg_data = _base_msg(msg_id, uid, sender_name, group_id, is_group, now)
+    msg_data["image"] = user_data.get("image", "")
     extra_preview = {}
 
     if msg_type == "text":
@@ -541,10 +573,7 @@ def send_message(group_id):
         return jsonify({"error": f"Unknown message type: {msg_type}"}), 400
 
     # Write message
-    batch = db.batch()
-    for msg_ref in _message_refs(db, group_id, msg_id):
-        batch.set(msg_ref, msg_data)
-    batch.commit()
+    _canonical_message_collection(db, group_id).document(msg_id).set(msg_data)
 
     # Update group document last_message
     try:
