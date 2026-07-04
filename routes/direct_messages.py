@@ -190,22 +190,6 @@ def send_direct_message(other_user_id):
         last_msg = "\U0001f4f7 Photo"
         extra_preview = {"isImageShared": True}
 
-    elif msg_type == "voice_note":
-        voice_url = data.get("voiceNoteUrl", "")
-        if not voice_url:
-            return jsonify({"error": "voiceNoteUrl is required for voice_note messages"}), 400
-        duration = data.get("voiceNoteDuration", 0)
-        try:
-            duration = int(duration)
-        except (TypeError, ValueError):
-            duration = 0
-        msg_data["isVoiceNote"] = True
-        msg_data["voiceNoteUrl"] = voice_url
-        msg_data["voiceNoteDuration"] = duration
-        msg_data["message"] = f"{sender_name} sent a voice note"
-        last_msg = "\U0001f3a4 Voice note"
-        extra_preview = {"isVoiceNote": True}
-
     else:
         return jsonify({"error": f"Unsupported message type for DMs: {msg_type}"}), 400
 

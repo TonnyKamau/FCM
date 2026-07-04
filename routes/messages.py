@@ -21,7 +21,6 @@ _MAX_LIMIT = 200
 _MEDIA_UPLOAD_URL = "https://api.kit-ifms.com/api/photos/upload"
 _MAX_MEDIA_BYTES = 20 * 1024 * 1024
 _ALLOWED_MEDIA_TYPES = {
-    "audio/mp4", "audio/aac", "audio/mpeg", "audio/ogg", "audio/wav",
     "image/jpeg", "image/png", "image/webp",
 }
 
@@ -124,8 +123,6 @@ def upload_message_media(group_id):
     if content_type in {"", "application/octet-stream"}:
         extension = uploaded.filename.rsplit(".", 1)[-1].lower() if "." in uploaded.filename else ""
         content_type = {
-            "m4a": "audio/mp4", "aac": "audio/aac", "mp3": "audio/mpeg",
-            "ogg": "audio/ogg", "wav": "audio/wav",
             "jpg": "image/jpeg", "jpeg": "image/jpeg",
             "png": "image/png", "webp": "image/webp",
         }.get(extension, content_type)
@@ -138,7 +135,7 @@ def upload_message_media(group_id):
     if len(payload) > _MAX_MEDIA_BYTES:
         return jsonify({"error": "File exceeds 20 MB"}), 413
 
-    upload_type = "voice_note" if content_type.startswith("audio/") else "chat"
+    upload_type = "chat"
     try:
         upstream = requests.post(
             _MEDIA_UPLOAD_URL,
@@ -520,23 +517,6 @@ def send_message(group_id):
         msg_data["replyToText"] = data.get("replyToText", "")
         last_msg = f"{sender_name}: {text}" if is_group else text
 
-    elif msg_type == "money":
-        # Flutter sends 'money' (a string like "100"); also accept numeric 'amount'
-        amount = data.get("amount") if data.get("amount") is not None else data.get("money")
-        if amount is None:
-            return jsonify({"error": "amount (or money) is required for money messages"}), 400
-        try:
-            amount = float(amount)
-        except (TypeError, ValueError):
-            return jsonify({"error": "amount must be a number"}), 400
-        money_str = f"KES {amount:.2f}"
-        msg_data["isMoneyShared"] = True
-        msg_data["money"] = money_str
-        msg_data["whoShared"] = sender_name
-        msg_data["message"] = f"{sender_name} shared {money_str}"
-        last_msg = msg_data["message"]
-        extra_preview = {"isMoneyShared": True, "money": money_str, "whoShared": sender_name}
-
     elif msg_type == "image":
         image_data = data.get("image", "")
         if not image_data:
@@ -548,46 +528,6 @@ def send_message(group_id):
         msg_data["message"] = caption or f"{sender_name} shared an image"
         last_msg = f"{sender_name}: 📷 Photo" if is_group else "📷 Photo"
         extra_preview = {"isImageShared": True}
-
-    elif msg_type == "voice_note":
-        voice_url = data.get("voiceNoteUrl", "")
-        if not voice_url:
-            return jsonify({"error": "voiceNoteUrl is required for voice_note messages"}), 400
-        duration = data.get("voiceNoteDuration", 0)
-        try:
-            duration = int(duration)
-        except (TypeError, ValueError):
-            duration = 0
-        msg_data["isVoiceNote"] = True
-        msg_data["voiceNoteUrl"] = voice_url
-        msg_data["voiceNoteDuration"] = duration
-        msg_data["message"] = f"{sender_name} sent a voice note"
-        last_msg = f"{sender_name}: 🎤 Voice note" if is_group else "🎤 Voice note"
-        extra_preview = {"isVoiceNote": True}
-
-    elif msg_type == "poll":
-        # Flutter sends either top-level question+options OR a nested pollModel object
-        nested_poll = data.get("pollModel") or {}
-        question = (data.get("question") or nested_poll.get("question") or "").strip()
-        raw_options = data.get("options") or [
-            o.get("text", "") for o in (nested_poll.get("options") or [])
-        ]
-        if not question:
-            return jsonify({"error": "question is required for poll messages"}), 400
-        if not raw_options or not isinstance(raw_options, list) or len(raw_options) < 2:
-            return jsonify({"error": "at least 2 options are required for poll messages"}), 400
-        # Android-compatible structure (PollModel.java): options are plain
-        # strings; votes live in {votes: {index: count}, voters: {uid: index}}.
-        poll_model = {
-            "question": question,
-            "options": [str(opt) for opt in raw_options],
-            "senderId": uid,
-            "votes": {"votes": {}, "voters": {}},
-        }
-        msg_data["isPoll"] = True
-        msg_data["pollModel"] = poll_model
-        msg_data["message"] = f"{sender_name} created a poll: {question}"
-        last_msg = f"{sender_name}: 📊 Poll"
 
     elif msg_type == "reaction":
         # Handled by its own endpoint; reject if sent here

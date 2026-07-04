@@ -18,6 +18,7 @@ from routes.expenses import expenses_bp, income_bp
 from routes.reports import reports_bp
 from routes.mpesa import mpesa_bp
 from routes.dashboard import dashboard_bp
+from routes.photos import photos_bp
 
 app = Flask(__name__)
 app.config["API_KEY"] = API_KEY
@@ -100,6 +101,7 @@ app.register_blueprint(income_bp)
 app.register_blueprint(reports_bp)
 app.register_blueprint(mpesa_bp)
 app.register_blueprint(dashboard_bp)
+app.register_blueprint(photos_bp)
 
 
 @app.after_request
