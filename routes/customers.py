@@ -6,6 +6,7 @@ import db_constants as C
 import uuid
 from datetime import datetime, timezone
 from cache_utils import cached_is_member, get_cached_group_payload, set_cached_group_payload, invalidate_group_payload
+from routes.messages import post_group_event_message
 
 customers_bp = Blueprint("customers", __name__, url_prefix="/groups/<group_id>/customers")
 
@@ -200,17 +201,25 @@ def create_customer(group_id):
     cust_id = data.get("id") or str(uuid.uuid4())
     cust_data = {
         "group_id":        group_id,
+        "groupId":         group_id,
+        "chatID":          group_id,
+        "id":              cust_id,
         "name":            name,
         "phone":           data.get("phone", ""),
         "email":           data.get("email", ""),
         "address":         data.get("address", ""),
         "balance":         float(data.get("balance", 0)),
+        "totalCredit":     float(data.get("totalCredit", data.get("balance", 0)) or 0),
+        "totalPaid":       float(data.get("totalPaid", 0) or 0),
         "credit_limit":    float(data.get("creditLimit", 0) or data.get("credit_limit", 0) or 0),
         "notes":           data.get("notes", ""),
         "is_active":       bool(data.get("isActive", True) if "isActive" in data else data.get("is_active", True)),
+        "isActive":        bool(data.get("isActive", True) if "isActive" in data else data.get("is_active", True)),
         "created_by":      uid,
         "created_at":      int(datetime.now(timezone.utc).timestamp() * 1000),
+        "registrationDate": int(datetime.now(timezone.utc).timestamp() * 1000),
         "tax_id":          data.get("taxId", "")         or data.get("tax_id",         ""),
+        "kraPin":          data.get("taxId", "")         or data.get("tax_id",         ""),
         "secondary_phone": data.get("secondaryPhone", "") or data.get("secondary_phone", ""),
         "category":        data.get("category", ""),
     }
@@ -246,6 +255,15 @@ def create_customer(group_id):
 
     invalidate_group_payload("customers", group_id)
     invalidate_group_payload("customers_canonical", group_id)
+    try:
+        post_group_event_message(
+            db,
+            uid,
+            group_id,
+            f"📝 New Customer Registered: {name} | Phone: {cust_data['phone']}",
+        )
+    except Exception:
+        pass
     return jsonify({"customer": customer_to_dict(cust_id, cust_data)}), 201
 
 
@@ -273,6 +291,8 @@ def update_customer(group_id, customer_id):
     ]:
         if req_key in data:
             updates[db_key] = data[req_key]
+    if "taxId" in data or "tax_id" in data:
+        updates["kraPin"] = data.get("taxId", data.get("tax_id", ""))
     if "balance" in data:
         updates["balance"] = float(data["balance"])
     if "creditLimit" in data:
@@ -281,6 +301,7 @@ def update_customer(group_id, customer_id):
         updates["credit_limit"] = float(data["credit_limit"])
     if "isActive" in data:
         updates["is_active"] = bool(data["isActive"])
+        updates["isActive"] = bool(data["isActive"])
     if "is_active" in data:
         updates["is_active"] = bool(data["is_active"])
 
@@ -414,13 +435,21 @@ def record_payment(group_id, customer_id):
     payment_id = str(uuid.uuid4())
     payment_data = {
         "group_id":     group_id,
+        "groupId":      group_id,
+        "id":           payment_id,
         "customer_id":  customer_id,
+        "customerId":   customer_id,
         "amount":       amount,
         "method":       data.get("method", "cash"),
+        "paymentMethod": data.get("method", "cash"),
+        "reference":    data.get("reference", "") or "",
         "notes":        data.get("notes", "") or "",
         "created_by":   uid,
+        "recordedBy":   uid,
         "is_allocated": True,
         "timestamp":    now,
+        "paymentDate":  now,
+        "entryType":    "customer_payment",
     }
 
     # ── Primary: Android path BUSINESS_DATA/{groupId}/customer_payments/{id} ──
@@ -513,7 +542,7 @@ def list_payments(group_id, customer_id):
     try:
         for d in (
             _bd_payments_ref(db, group_id)
-            .where("customer_id", "==", customer_id)
+            .where("customerId", "==", customer_id)
             .get()
         ):
             pay_map[d.id] = customer_payment_to_dict(d.id, d.to_dict())

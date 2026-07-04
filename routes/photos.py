@@ -20,7 +20,7 @@ import db_constants as C
 photos_bp = Blueprint("photos", __name__, url_prefix="/photos")
 
 _MEDIA_UPLOAD_URL = "https://api.kit-ifms.com/api/photos/upload"
-_MAX_BYTES = 10 * 1024 * 1024
+_MAX_BYTES = 20 * 1024 * 1024
 _ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _ALLOWED_UPLOAD_TYPES = {"profile", "product", "group", "chat"}
 
@@ -53,7 +53,7 @@ def upload_photo():
     if not payload:
         return jsonify({"error": "File is empty"}), 400
     if len(payload) > _MAX_BYTES:
-        return jsonify({"error": "File exceeds 10 MB"}), 413
+        return jsonify({"error": "File exceeds 20 MB"}), 413
 
     try:
         upstream = requests.post(
@@ -90,9 +90,10 @@ def upload_photo():
         try:
             # Android's UserModel reads "image"/"photoUrl"; this backend and
             # the Flutter app read "image_url" — keep all three in sync.
+            media_id = str(data.get("photo_id") or "")
             get_db().collection(C.USERS).document(uid).update({
                 "image_url": url,
-                "image": url,
+                "image": media_id or url,
                 "photoUrl": url,
             })
         except Exception as exc:

@@ -12,6 +12,7 @@ from cache_utils import (
     invalidate_group_payload,
     invalidate_report,
 )
+from routes.messages import post_group_event_message
 
 stock_bp = Blueprint("stock", __name__, url_prefix="/groups/<group_id>/stock")
 
@@ -190,7 +191,10 @@ def add_stock_in(group_id):
     entry_id = str(uuid.uuid4())
     entry_data = {
         "group_id":       group_id,
+        "groupId":        group_id,
+        "id":             entry_id,
         "product_id":     product_id,
+        "productId":      product_id,
         "name":           product_name,
         "measuring_unit": measuring_unit,
         "buying_price":   buying_price,
@@ -242,6 +246,7 @@ def add_stock_in(group_id):
 
     # ── Update product available_stock ────────────────────────────────────────
     stock_updated = False
+    closing_stock = quantity
 
     # Android path first
     bd_prod_ref = _bd_products_ref(db, group_id).document(product_id)
@@ -253,6 +258,7 @@ def add_stock_in(group_id):
             "buying_price": buying_price,
             "unit_price": unit_price,
         })
+        closing_stock = current_stock + quantity
         stock_updated = True
 
     # Flat PRODUCTS collection
@@ -288,6 +294,26 @@ def add_stock_in(group_id):
     invalidate_group_payload("products_canonical", group_id)
     invalidate_report("stock", group_id)
     invalidate_report("stock_canonical", group_id)
+    try:
+        stock_card = (
+            "📦 STOCK ADDITION CARD\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{'Product':<20} | {product_name}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{'Added Today':<20} | {quantity:.0f} units\n"
+            f"{'New Stock Level':<20} | {closing_stock:.0f} units\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ Stock successfully updated"
+        )
+        post_group_event_message(
+            db,
+            uid,
+            group_id,
+            stock_card,
+            sender_name_override="Stock Manager",
+        )
+    except Exception:
+        pass
     return jsonify({"stockIn": stock_in_to_dict(entry_id, entry_data)}), 201
 
 
@@ -411,7 +437,9 @@ def record_stock_out(group_id):
     movement_id = str(uuid.uuid4())
     movement_data = {
         "group_id":       group_id,
+        "groupId":        group_id,
         "product_id":     product_id,
+        "productId":      product_id,
         "name":           product_name,
         "unit_price":     unit_price,
         "buying_price":   buying_price,

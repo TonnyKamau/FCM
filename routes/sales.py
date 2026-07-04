@@ -157,6 +157,14 @@ def _bd_stock_movements_ref(db, group_id):
     )
 
 
+def _bd_ledger_ref(db, group_id):
+    return (
+        db.collection(C.BUSINESS_DATA)
+        .document(group_id)
+        .collection("ledger_entries")
+    )
+
+
 def _invalidate_sales_caches(group_id):
     invalidate_group_payload("sales", group_id)
     invalidate_group_payload("sales_canonical", group_id)
@@ -619,23 +627,47 @@ def create_sale(group_id):
 
         sale_data = {
             "group_id":       group_id,
+            "groupId":        group_id,
+            "id":             sale_id,
             "product_id":     product_id,
+            "productId":      product_id,
             "product_name":   product_name,
+            "name":           product_name,
             "unit_price":     unit_price,
             "buying_price":   buying_price,
             "quantity":       quantity,
             "person_name":    person_name,
             "customer_id":    customer_id,
             "payment_status": not is_credit,
+            "paymentStatus":  not is_credit,
             "is_credit":      is_credit,
             "payment_method": payment_method,
             "sale_type":      sale_type,
+            "saleType":       sale_type,
+            "personName":     person_name,
+            "customerId":     customer_id,
+            "totalAmount":    line_total,
             "created_by":     uid,
             "date":           now,
         }
 
         # ── Primary: Android path BUSINESS_DATA/{groupId}/sales/{saleId} ─────
         batch.set(_bd_sales_ref(db, group_id).document(sale_id), sale_data)
+
+        product_ref = (
+            db.collection(C.BUSINESS_DATA)
+            .document(group_id)
+            .collection(C.BD_PRODUCTS)
+            .document(product_id)
+        )
+        product_doc = product_ref.get()
+        if product_doc.exists:
+            current_stock = float(
+                (product_doc.to_dict() or {}).get("available_stock", 0) or 0
+            )
+            batch.update(product_ref, {
+                "available_stock": max(0, current_stock - quantity),
+            })
 
         # ── Legacy: flat collection ───────────────────────────────────────────
         batch.set(db.collection(sale_collection).document(sale_id), sale_data)
@@ -669,7 +701,9 @@ def create_sale(group_id):
         stock_out_ids.append(stock_out_id)
         movement_data = {
             "group_id":       group_id,
+            "groupId":        group_id,
             "product_id":     product_id,
+            "productId":      product_id,
             "name":           product_name,
             "unit_price":     unit_price,
             "buying_price":   buying_price,
@@ -720,6 +754,21 @@ def create_sale(group_id):
         "created_by": uid,
         "timestamp":  now,
         "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    batch.set(_bd_ledger_ref(db, group_id).document(expense_id), {
+        "id": expense_id,
+        "groupId": group_id,
+        "chatID": group_id,
+        "name": description,
+        "price": total,
+        "isExpense": False,
+        "entryType": "income",
+        "category": "Sales",
+        "source": "Sales",
+        "isSalesIncome": True,
+        "paymentMethod": payment_method,
+        "createdBy": uid,
+        "timestamp": now,
     })
 
     # Update customer debt for credit sales
@@ -927,16 +976,25 @@ def create_multi_sale(group_id):
         sale_id = str(uuid.uuid4())
         sale_data = {
             "group_id":       group_id,
+            "groupId":        group_id,
+            "id":             sale_id,
             "product_id":     product_id,
+            "productId":      product_id,
             "product_name":   product_name,
+            "name":           product_name,
             "unit_price":     unit_price,
             "buying_price":   buying_price,
             "quantity":       quantity,
             "person_name":    person_name,
             "customer_id":    customer_id,
             "payment_status": not is_credit,
+            "paymentStatus":  not is_credit,
             "is_credit":      is_credit,
             "sale_type":      sale_type,
+            "saleType":       sale_type,
+            "personName":     person_name,
+            "customerId":     customer_id,
+            "totalAmount":    line_total,
             "created_by":     uid,
             "date":           now,
         }
@@ -960,7 +1018,9 @@ def create_multi_sale(group_id):
             _bd_stock_movements_ref(db, group_id).document(movement_id),
             {
                 "group_id":       group_id,
+                "groupId":        group_id,
                 "product_id":     product_id,
+                "productId":      product_id,
                 "name":           product_name,
                 "unit_price":     unit_price,
                 "buying_price":   buying_price,
@@ -1004,6 +1064,21 @@ def create_multi_sale(group_id):
         "created_by": uid,
         "timestamp":  now,
         "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    batch.set(_bd_ledger_ref(db, group_id).document(expense_id), {
+        "id": expense_id,
+        "groupId": group_id,
+        "chatID": group_id,
+        "name": description,
+        "price": total,
+        "isExpense": False,
+        "entryType": "income",
+        "category": "Sales",
+        "source": "Sales",
+        "isSalesIncome": True,
+        "paymentMethod": data.get("paymentMethod", "cash"),
+        "createdBy": uid,
+        "timestamp": now,
     })
 
     # Update customer debt

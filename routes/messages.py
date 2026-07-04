@@ -516,6 +516,38 @@ def _base_msg(msg_id, uid, sender_name, group_id, is_group, now):
 
 # ─── send message ────────────────────────────────────────────────────────────
 
+def post_group_event_message(
+    db,
+    uid,
+    group_id,
+    text,
+    *,
+    sender_name_override=None,
+    timestamp=None,
+):
+    """Write an Android-compatible business event and update group previews."""
+    now = timestamp or int(datetime.now(timezone.utc).timestamp() * 1000)
+    user_doc = db.collection(C.USERS).document(uid).get()
+    user_data = user_doc.to_dict() or {} if user_doc.exists else {}
+    sender_name = sender_name_override or user_data.get("name", "User")
+    _, group_data = _check_member(db, group_id, uid)
+    msg_id = str(uuid.uuid4())
+    message = _base_msg(msg_id, uid, sender_name, group_id, True, now)
+    message["message"] = text
+    message["image"] = user_data.get("image", "")
+    _canonical_message_collection(db, group_id).document(msg_id).set(message)
+    preview_name = user_data.get("name", sender_name)
+    _update_chat_previews(
+        db,
+        uid,
+        group_id,
+        group_data,
+        f"{preview_name}: {text}",
+        now,
+    )
+    return msg_id
+
+
 @messages_bp.route("", methods=["POST"])
 @require_auth
 def send_message(group_id):

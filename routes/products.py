@@ -194,8 +194,11 @@ def create_product(group_id):
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     product_data = {
         "group_id":        group_id,
+        "groupId":         group_id,
+        "id":              product_id,
         "name":            name,
         "description":     data.get("desc", ""),
+        "desc":            data.get("desc", ""),
         "image":           data.get("image", ""),
         "buying_price":    float(data.get("buying_price",    0)),
         "unit_price":      float(data.get("unit_price",      0)),
@@ -204,6 +207,8 @@ def create_product(group_id):
         "measuring_unit":  data.get("measuring_unit", "pcs"),
         "category":        data.get("category", ""),
         "created_at":      int(data.get("date", now)),
+        "date":            int(data.get("date", now)),
+        "unit":            float(data.get("unit", 0) or 0),
         "barcode":         data.get("barcode", ""),
         "code":            data.get("code", ""),
         "wholesale_price": float(data.get("wholesale_price", 0) or data.get("wholesalePrice", 0) or 0),
@@ -275,12 +280,20 @@ def update_product(group_id, product_id):
     data = request.get_json() or {}
     updates = {}
     for req_key, db_key in [
-        ("name", "name"), ("desc", "description"), ("image", "image"),
+        ("name", "name"), ("image", "image"),
         ("category", "category"), ("measuring_unit", "measuring_unit"),
         ("barcode", "barcode"), ("code", "code"),
     ]:
         if req_key in data:
             updates[db_key] = data[req_key]
+    if "desc" in data:
+        updates["desc"] = data["desc"]
+        updates["description"] = data["desc"]
+    if "date" in data:
+        updates["date"] = int(data["date"])
+        updates["created_at"] = int(data["date"])
+    if "unit" in data:
+        updates["unit"] = float(data["unit"])
 
     image_value = updates.get("image")
     if image_value not in (None, "") and not str(image_value).startswith(("http://", "https://")):

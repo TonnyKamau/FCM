@@ -19,6 +19,7 @@ from auth_utils import require_auth, get_jwt_identity
 import uuid
 from datetime import datetime, timezone
 from cache_utils import cached_is_member, get_cached_group_payload, set_cached_group_payload, invalidate_group_payload
+from routes.messages import post_group_event_message
 
 # ── Firestore collection names ────────────────────────────────────────────────
 _EXPENSES        = "EXPENSES"
@@ -236,6 +237,17 @@ def _create(group_id, is_expense_flag):
     base_cache_name = "expenses" if is_expense_flag else "income"
     invalidate_group_payload(base_cache_name, group_id)
     invalidate_group_payload(f"{base_cache_name}_canonical", group_id)
+    try:
+        event_type = "expense" if is_expense_flag else "income"
+        post_group_event_message(
+            db,
+            uid,
+            group_id,
+            f"added {event_type} of KES {entry_data['price']:.2f}"
+            f"{' for ' + name if name else ''}",
+        )
+    except Exception:
+        pass
     key = "expense" if is_expense_flag else "income"
     return jsonify({key: _to_dict(entry_id, entry_data)}), 201
 
