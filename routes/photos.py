@@ -88,7 +88,13 @@ def upload_photo():
     # Profile uploads update the user document directly, same as Android.
     if upload_type == "profile":
         try:
-            get_db().collection(C.USERS).document(uid).update({"image_url": url})
+            # Android's UserModel reads "image"/"photoUrl"; this backend and
+            # the Flutter app read "image_url" — keep all three in sync.
+            get_db().collection(C.USERS).document(uid).update({
+                "image_url": url,
+                "image": url,
+                "photoUrl": url,
+            })
         except Exception as exc:
             logging.warning("Could not update profile image for %s: %s", uid, exc)
 

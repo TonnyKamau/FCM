@@ -59,6 +59,10 @@ def update_user(uid):
     image_value = updates.get("image_url")
     if image_value not in (None, "") and not str(image_value).startswith(("http://", "https://")):
         return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
+    if image_value is not None:
+        # Android's UserModel reads "image"/"photoUrl" — keep them in sync.
+        updates["image"] = image_value
+        updates["photoUrl"] = image_value
 
     doc.reference.update(updates)
     updated = db.collection(C.USERS).document(uid).get()

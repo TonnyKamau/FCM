@@ -577,23 +577,51 @@ _SETTINGS_DB_MAP = {
 }
 
 
+def _resolve_group_admin(db, group_id):
+    """Return (ga_exists, profile_exists, merged_group_data, admin_id).
+
+    Android-created groups only have a GROUP_PROFILES doc; backend-created
+    ones only have GroupAccounts. Settings must work for both."""
+    ga_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
+    ga = ga_doc.to_dict() if ga_doc.exists else None
+    profile = None
+    try:
+        pdoc = db.collection(C.GROUP_PROFILES).document(group_id).get()
+        if pdoc.exists:
+            profile = pdoc.to_dict() or {}
+    except Exception:
+        pass
+    merged = profile or ga or {}
+    admin_id = ""
+    if ga:
+        admin_id = ga.get("admin_id", "")
+    if not admin_id and profile:
+        admin_id = profile.get("adminID", "")
+    return ga is not None, profile is not None, merged, admin_id
+
+
 @groups_bp.route("/<group_id>/settings", methods=["GET"])
 @require_auth
 def get_settings(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
-    if not group_doc.exists:
+    ga_exists, profile_exists, gd, _admin = _resolve_group_admin(db, group_id)
+    if not ga_exists and not profile_exists:
         return jsonify({"error": "Group not found"}), 404
-    gd = group_doc.to_dict() or {}
+
+    def flag(camel, snake):
+        if camel in gd:
+            return bool(gd.get(camel, False))
+        return bool(gd.get(snake, False))
+
     settings = {
         "name":                                 gd.get("name", ""),
         "image":                                gd.get("image", ""),
-        "restrictMoneyAfterLoanRequest":        gd.get("restrict_money_after_loan", False),
-        "requireAdminApprovalForLoans":         gd.get("require_admin_approval_loans", False),
-        "allowMemberStatementAccess":           gd.get("allow_member_statement_access", False),
-        "allowDirectMemberAccountWithdrawals":  gd.get("allow_direct_member_account_withdrawals", False),
-        "allowMembersToViewOtherMemberBalances": gd.get("allow_members_to_view_other_member_balances", False),
+        "restrictMoneyAfterLoanRequest":        flag("restrictMoneyAfterLoanRequest", "restrict_money_after_loan"),
+        "requireAdminApprovalForLoans":         flag("requireAdminApprovalForLoans", "require_admin_approval_loans"),
+        "allowMemberStatementAccess":           flag("allowMemberStatementAccess", "allow_member_statement_access"),
+        "allowDirectMemberAccountWithdrawals":  flag("allowDirectMemberAccountWithdrawals", "allow_direct_member_account_withdrawals"),
+        "allowMembersToViewOtherMemberBalances": flag("allowMembersToViewOtherMemberBalances", "allow_members_to_view_other_member_balances"),
     }
     return jsonify({"settings": settings})
 
@@ -603,12 +631,11 @@ def get_settings(group_id):
 def update_settings(group_id):
     uid = get_jwt_identity()
     db = get_db()
-    group_doc = db.collection(C.GROUP_ACCOUNTS).document(group_id).get()
-    if not group_doc.exists:
+    ga_exists, profile_exists, gd, admin_id = _resolve_group_admin(db, group_id)
+    if not ga_exists and not profile_exists:
         return jsonify({"error": "Group not found"}), 404
-    gd = group_doc.to_dict() or {}
 
-    if gd.get("admin_id") != uid:
+    if admin_id != uid:
         return jsonify({"error": "Only the group owner can update settings"}), 403
 
     data = request.get_json() or {}
@@ -626,7 +653,17 @@ def update_settings(group_id):
         return jsonify({"error": "image must be an uploaded URL; use POST /photos/upload first"}), 400
 
     try:
-        db.collection(C.GROUP_ACCOUNTS).document(group_id).update(updates)
+        if ga_exists:
+            db.collection(C.GROUP_ACCOUNTS).document(group_id).update(updates)
+        # Android canonical structure: GROUP_PROFILES uses the camelCase
+        # field names from GroupStructureService.profileMap.
+        if profile_exists or not ga_exists:
+            profile_updates = {
+                field: data[field] for field in _SETTINGS_FIELDS if field in data
+            }
+            db.collection(C.GROUP_PROFILES).document(group_id).set(
+                profile_updates, merge=True
+            )
     except Exception as exc:
         logging.exception("Failed to update group settings: %s", exc)
         return jsonify({"error": "Failed to update settings"}), 500
@@ -640,9 +677,25 @@ def update_settings(group_id):
 
     if preview_updates:
         try:
-            member_docs = db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get()
-            for md in member_docs:
+            member_ids = set()
+            for md in db.collection(C.GROUP_MEMBERS).where("group_id", "==", group_id).get():
                 mid = md.to_dict().get("user_id", "")
+                if mid:
+                    member_ids.add(mid)
+            # Android canonical member list
+            try:
+                for md in (
+                    db.collection(C.GROUP_PROFILES)
+                    .document(group_id)
+                    .collection(C.GP_MEMBERS)
+                    .get()
+                ):
+                    mid = (md.to_dict() or {}).get("userId", "") or md.id
+                    if mid:
+                        member_ids.add(mid)
+            except Exception:
+                pass
+            for mid in member_ids:
                 if mid:
                     (
                         db.collection(C.USER_CHAT_PREVIEWS)
