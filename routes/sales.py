@@ -6,6 +6,8 @@ import db_constants as C
 import logging
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from google.cloud import firestore
 from google.cloud.firestore import Increment
 from cache_utils import (
     cached_is_member,
@@ -20,8 +22,8 @@ def _is_true(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _increment_group_account_balance(db, group_id, amount):
-    """Atomically add `amount` to the savings GroupAccount balance."""
+def _increment_group_account_balance(db, group_id, amount, created_by, sale_ids):
+    """Credit an M-Pesa sale to the group's savings account with an audit entry."""
     try:
         accounts_ref = (
             db.collection("GroupAccounts")
@@ -29,16 +31,70 @@ def _increment_group_account_balance(db, group_id, amount):
             .collection("accounts")
         )
         savings_docs = list(
-            accounts_ref.where("accountType", "==", "savings").limit(1).get()
+            accounts_ref.where("accountType", "==", "savings").get()
         )
+        savings_docs = [
+            doc for doc in savings_docs
+            if (doc.to_dict() or {}).get("isActive", True)
+        ]
         if not savings_docs:
-            savings_docs = list(
-                accounts_ref.where("accountType", "==", "NORMAL").limit(1).get()
+            logging.error(
+                "No savings account found for M-Pesa sale credit (group=%s amount=%s)",
+                group_id,
+                amount,
             )
-        if savings_docs:
-            savings_docs[0].reference.update({"balance": Increment(amount)})
+            return False
+
+        account_ref = savings_docs[0].reference
+        account_data = savings_docs[0].to_dict() or {}
+        account_id = str(account_data.get("accountId") or account_ref.id)
+        tx_id = str(uuid.uuid4())
+        now_dt = datetime.now(timezone.utc)
+        now = int(now_dt.timestamp() * 1000)
+        month = now_dt.astimezone(ZoneInfo("Africa/Nairobi")).strftime("%b")
+        group_tx_ref = (
+            db.collection("GroupTransactions")
+            .document(group_id)
+            .collection(account_id)
+            .document(month)
+            .collection("transactions")
+            .document(tx_id)
+        )
+
+        @firestore.transactional
+        def credit_sale(transaction):
+            account_doc = account_ref.get(transaction=transaction)
+            current_balance = float(
+                (account_doc.to_dict() or {}).get("balance", 0) or 0
+            )
+            new_balance = current_balance + amount
+            transaction.update(account_ref, {
+                "balance": new_balance,
+                "updatedAt": now,
+            })
+            transaction.set(
+                group_tx_ref,
+                {
+                    "id": tx_id,
+                    "type": "SAVINGS",
+                    "amount": amount,
+                    "paymentMethod": "MPESA_SALE",
+                    "timestamp": now,
+                    "status": "DONE",
+                    "accountType": "SAVINGS",
+                    "accountReference": "POS sale paid via M-Pesa",
+                    "accountBalanceAfter": new_balance,
+                    "createdBy": created_by,
+                    "source": "SALES",
+                    "saleIds": sale_ids,
+                },
+            )
+
+        credit_sale(db.transaction())
+        return True
     except Exception as e:
         logging.exception("_increment_group_account_balance error (%s): %s", group_id, e)
+        return False
 
 
 def _check_member(db, group_id, uid):
@@ -421,7 +477,7 @@ def create_sale(group_id):
     admin_id = admin_id or uid
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     is_credit = data.get("isCredit", False)
-    payment_method = data.get("paymentMethod", "cash")
+    payment_method = str(data.get("paymentMethod", "cash")).strip().lower()
     customer_id = data.get("customerId", "")
     person_name = data.get("personName", "Walk-in Customer")
     sale_type = "credit" if is_credit else "cash"
@@ -613,7 +669,13 @@ def create_sale(group_id):
     invalidate_report("stock_canonical", group_id)
 
     if not is_credit and payment_method == "mpesa":
-        _increment_group_account_balance(db, group_id, total)
+        _increment_group_account_balance(
+            db,
+            group_id,
+            total,
+            uid,
+            [sale["id"] for sale in created_sales],
+        )
 
     # Fire-and-forget: post sale notification + update chat previews
     try:

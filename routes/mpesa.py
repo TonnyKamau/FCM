@@ -20,7 +20,10 @@ POST /mpesa/stk-callback  (public — called by Safaricom)
 
 import logging
 from flask import Blueprint, request, jsonify
-from auth_utils import require_auth
+from auth_utils import require_auth, get_jwt_identity
+from firebase_utils import get_db
+from cache_utils import cached_is_member
+from routes.sales import _check_member
 from mpesa_api import MpesaAPI
 
 logger = logging.getLogger(__name__)
@@ -60,11 +63,24 @@ def stk_push():
     phone     = str(data.get("phone", "")).strip()
     amount    = data.get("amount")
     reference = str(data.get("reference", "KIT-IFMS POS")).strip()
+    group_id  = str(data.get("groupId", "")).strip()
 
     if not phone:
         return jsonify({"error": "phone is required"}), 400
     if amount is None:
         return jsonify({"error": "amount is required"}), 400
+    if not group_id:
+        return jsonify({"error": "groupId is required"}), 400
+
+    uid = get_jwt_identity()
+    db = get_db()
+    is_member, _ = cached_is_member(
+        group_id,
+        uid,
+        lambda: _check_member(db, group_id, uid),
+    )
+    if not is_member:
+        return jsonify({"error": "Access denied"}), 403
 
     try:
         amount = int(float(amount))
@@ -136,9 +152,22 @@ def stk_query():
     """
     data = request.get_json(silent=True) or {}
     checkout_request_id = str(data.get("checkoutRequestId", "")).strip()
+    group_id = str(data.get("groupId", "")).strip()
 
     if not checkout_request_id:
         return jsonify({"error": "checkoutRequestId is required"}), 400
+    if not group_id:
+        return jsonify({"error": "groupId is required"}), 400
+
+    uid = get_jwt_identity()
+    db = get_db()
+    is_member, _ = cached_is_member(
+        group_id,
+        uid,
+        lambda: _check_member(db, group_id, uid),
+    )
+    if not is_member:
+        return jsonify({"error": "Access denied"}), 403
 
     result = _mpesa.query_stk_push_status(checkout_request_id)
 
