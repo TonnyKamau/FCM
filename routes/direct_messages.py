@@ -182,6 +182,10 @@ def send_direct_message(other_user_id):
         image_data = data.get("image", "")
         if not image_data:
             return jsonify({"error": "image is required for image messages"}), 400
+        # Android only renders http(s) URLs (ChatAdapter.isValidImageUrl) —
+        # reject base64 payloads so every client stays compatible.
+        if not image_data.startswith(("http://", "https://")):
+            return jsonify({"error": "image must be an uploaded URL; use POST /messages/media first"}), 400
         caption = data.get("caption", "").strip()
         msg_data["isImageShared"] = True
         msg_data["image"] = image_data
