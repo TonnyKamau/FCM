@@ -51,7 +51,7 @@ def stk_push():
     {
         "phone":     "0712345678",          // customer phone (any KE format)
         "amount":    1500,                  // integer or float, ceiled to int
-        "reference": "POS-1718000000000"    // account reference shown on M-Pesa
+        "reference": "POS48213"             // short account reference shown on M-Pesa
     }
 
     Response  200
@@ -243,7 +243,7 @@ def paybill_query():
 
     Request body
     ------------
-    { "reference": "POS-1718000000000", "amount": 1500, "groupId": "..." }
+    { "reference": "POS48213", "amount": 1500, "groupId": "..." }
 
     Response 200
     ------------
