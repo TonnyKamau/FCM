@@ -221,3 +221,57 @@ class MpesaAPI:
         except Exception as e:
             logger.error("Transaction status query failed: %s", e)
             return None
+
+    def pull_c2b_transactions(self, hours: int = 48):
+        """
+        Daraja Pull Transactions API — every C2B payment to the paybill in the
+        window (max 48 h). Used to verify paybill POS payments whose customer
+        typed the bill/order number as the account reference.
+
+        Numeric ShortCode/OffSetValue and Nairobi-time 'YYYY-MM-DD HH:MM:SS'
+        dates are what production accepts (verified against the live API).
+        Returns a flat list of rows ({transactionId, trxDate, msisdn,
+        billreference, amount, ...}) or None on failure.
+        """
+        token = self.get_access_token()
+        if not token:
+            return None
+
+        from datetime import timedelta
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo("Africa/Nairobi"))
+        except Exception:
+            now = datetime.now()
+        fmt = "%Y-%m-%d %H:%M:%S"
+        payload = {
+            "ShortCode": int(MPESA_BUSINESS_SHORT_CODE),
+            "StartDate": (now - timedelta(hours=min(hours, 48))).strftime(fmt),
+            "EndDate": now.strftime(fmt),
+            "OffSetValue": 0,
+        }
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.safaricom.co.ke/pulltransactions/v1/query",
+                json=payload, headers=headers, timeout=30,
+            )
+            data = resp.json()
+            if str(data.get("ResponseCode", "")) != "1000":
+                logger.warning(
+                    "Pull transactions non-success: %s %s",
+                    data.get("ResponseCode"), data.get("ResponseMessage"),
+                )
+                return []
+            rows = data.get("Response") or []
+            flat = []
+            for row in rows:
+                flat.extend(row if isinstance(row, list) else [row])
+            return flat
+        except Exception as e:
+            logger.error("Pull transactions query failed: %s", e)
+            return None

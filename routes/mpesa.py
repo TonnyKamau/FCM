@@ -19,12 +19,15 @@ POST /mpesa/stk-callback  (public — called by Safaricom)
 """
 
 import logging
+import time
+import requests
 from flask import Blueprint, request, jsonify
 from auth_utils import require_auth, get_jwt_identity
 from firebase_utils import get_db
 from cache_utils import cached_is_member
 from routes.sales import _check_member
 from mpesa_api import MpesaAPI
+from config import PAYMENT_API_URL
 
 logger = logging.getLogger(__name__)
 mpesa_bp = Blueprint("mpesa", __name__, url_prefix="/mpesa")
@@ -196,6 +199,188 @@ def stk_query():
         "cancelled":  cancelled,
         "resultCode": result_code,
         "message":    result_desc,
+    }), 200
+
+
+# ── Paybill (C2B) verification ────────────────────────────────────────────────
+
+def _fetch_php_paybill_records():
+    """
+    Confirmed C2B payments recorded by the legacy PHP layer (the paybill's
+    confirmation URL). The host's anti-bot layer intermittently rejects user
+    agents with HTTP 409, so try a curl profile then a browser profile.
+    Returns a list or None when the feed is unreachable.
+    """
+    for user_agent in ("curl/8.5.0", "Mozilla/5.0"):
+        try:
+            resp = requests.get(
+                PAYMENT_API_URL,
+                headers={"User-Agent": user_agent, "Accept": "*/*"},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+        except Exception as exc:
+            logger.warning("PHP payment feed fetch failed (%s): %s", user_agent, exc)
+    return None
+
+
+@mpesa_bp.route("/paybill-query", methods=["POST"])
+@require_auth
+def paybill_query():
+    """
+    Verify a C2B paybill payment for a POS sale.
+
+    The customer pays Paybill 4136651 with the bill/order number as the
+    account reference; the POS polls this endpoint with that reference and
+    the sale amount. A payment only verifies when the reference matches
+    EXACTLY and the paid amount equals the sale amount, and each M-Pesa
+    receipt can be claimed by exactly one sale (idempotent for re-polls of
+    the same reference).
+
+    Request body
+    ------------
+    { "reference": "POS-1718000000000", "amount": 1500, "groupId": "..." }
+
+    Response 200
+    ------------
+    { "verified": true,  "receipt": "UG9...", "amountPaid": 1500, "customer": "2547..." }
+    { "verified": false, "pending": true,  "message": "Payment not found yet" }
+    { "verified": false, "pending": false, "amountMismatch": true, "amountPaid": 1400, ... }
+    """
+    data = request.get_json(silent=True) or {}
+    reference = str(data.get("reference", "")).strip()
+    amount = data.get("amount")
+    group_id = str(data.get("groupId", "")).strip()
+
+    if not reference:
+        return jsonify({"error": "reference is required"}), 400
+    if amount is None:
+        return jsonify({"error": "amount is required"}), 400
+    if not group_id:
+        return jsonify({"error": "groupId is required"}), 400
+
+    uid = get_jwt_identity()
+    db = get_db()
+    is_member, _ = cached_is_member(
+        group_id,
+        uid,
+        lambda: _check_member(db, group_id, uid),
+    )
+    if not is_member:
+        return jsonify({"error": "Access denied"}), 403
+
+    try:
+        expected = round(float(amount), 2)
+        if expected <= 0:
+            raise ValueError("amount must be positive")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": f"Invalid amount: {exc}"}), 400
+
+    ref_norm = reference.lower()
+    candidates = []
+
+    # Source 1: PHP-recorded C2B confirmations (authoritative).
+    php_records = _fetch_php_paybill_records()
+    for record in php_records or []:
+        if str(record.get("PAYMENTMETHOD", "")) != "PAYBILL":
+            continue
+        if str(record.get("ACCOUNT REFERENCE", "")).strip().lower() != ref_norm:
+            continue
+        receipt = str(record.get("TRANSACTION CODE", "")).strip()
+        if receipt:
+            candidates.append({
+                "receipt": receipt,
+                "paid": round(float(record.get("AMOUNT") or 0), 2),
+                "customer": str(record.get("CUSTOMER") or ""),
+                "source": "php_feed",
+            })
+
+    # Source 2: Daraja Pull API — safety net for missed confirmations.
+    for row in _mpesa.pull_c2b_transactions() or []:
+        if str(row.get("billreference", "")).strip().lower() != ref_norm:
+            continue
+        receipt = str(row.get("transactionId", "")).strip()
+        if not receipt or any(c["receipt"] == receipt for c in candidates):
+            continue
+        candidates.append({
+            "receipt": receipt,
+            "paid": round(float(row.get("amount") or 0), 2),
+            "customer": str(row.get("msisdn") or ""),
+            "source": "pull_api",
+        })
+
+    if not candidates:
+        return jsonify({
+            "verified": False,
+            "pending": True,
+            "message": "Payment not found yet",
+        }), 200
+
+    amount_mismatch = None
+    for candidate in candidates:
+        if abs(candidate["paid"] - expected) >= 0.01:
+            amount_mismatch = candidate
+            continue
+
+        # Claim the receipt atomically — one M-Pesa payment funds one sale.
+        marker_ref = db.collection("POS_PAYBILL_RECEIPTS").document(candidate["receipt"])
+        claimed = False
+        try:
+            marker_ref.create({
+                "receipt": candidate["receipt"],
+                "reference": reference,
+                "groupId": group_id,
+                "amount": candidate["paid"],
+                "customer": candidate["customer"],
+                "source": candidate["source"],
+                "claimedBy": uid,
+                "claimedAt": int(time.time() * 1000),
+            })
+            claimed = True
+        except Exception:
+            existing = marker_ref.get()
+            existing_data = existing.to_dict() if existing.exists else {}
+            # Re-poll of the SAME sale is idempotent; a different sale may not
+            # reuse the receipt.
+            claimed = (
+                str(existing_data.get("reference", "")).lower() == ref_norm
+                and str(existing_data.get("groupId", "")) == group_id
+            )
+
+        if claimed:
+            logger.info(
+                "Paybill payment verified — ref=%s receipt=%s amount=%s source=%s",
+                reference, candidate["receipt"], candidate["paid"], candidate["source"],
+            )
+            return jsonify({
+                "verified": True,
+                "receipt": candidate["receipt"],
+                "amountPaid": candidate["paid"],
+                "customer": candidate["customer"],
+                "source": candidate["source"],
+            }), 200
+
+    if amount_mismatch:
+        return jsonify({
+            "verified": False,
+            "pending": False,
+            "amountMismatch": True,
+            "receipt": amount_mismatch["receipt"],
+            "amountPaid": amount_mismatch["paid"],
+            "message": (
+                f"Payment found but the amount differs — paid KES "
+                f"{amount_mismatch['paid']:g}, expected KES {expected:g}."
+            ),
+        }), 200
+
+    return jsonify({
+        "verified": False,
+        "pending": True,
+        "message": "Matching payment was already used for another sale",
     }), 200
 
 
